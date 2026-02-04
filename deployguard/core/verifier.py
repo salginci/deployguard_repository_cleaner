@@ -271,6 +271,87 @@ class SecretVerifier:
             message=f"Verification not supported for secret type: {secret_type}"
         )
     
+    def get_supported_types(self) -> List[str]:
+        """
+        Get list of supported secret types for verification.
+        
+        Returns:
+            List of secret type strings that can be verified
+        """
+        return [
+            "aws_access_key", "aws_secret_key",
+            "github_token", "github_pat", "github_fine_grained_pat", "github_oauth", "github_app_token",
+            "gitlab_token", "gitlab_pat", "gitlab_pipeline_token",
+            "slack_bot_token", "slack_user_token", "slack_webhook",
+            "stripe_api_key", "stripe", "stripe_restricted",
+            "twilio_api_key", "twilio",
+            "sendgrid_api_key", "sendgrid",
+            "openai_api_key", "openai",
+            "anthropic_api_key", "anthropic",
+            "huggingface_token", "huggingface",
+            "mailchimp_api_key", "mailchimp",
+            "mailgun_api_key", "mailgun",
+            "datadog_api_key", "datadog",
+            "newrelic_api_key", "newrelic",
+            "heroku_api_key", "heroku",
+            "digitalocean_pat", "digitalocean",
+            "npm_token", "npm",
+            "pypi_token", "pypi",
+            "discord_webhook", "discord_bot_token",
+            "shopify_token", "shopify",
+            "notion",
+            "airtable",
+            "asana",
+            "linear",
+            "sentry_dsn", "sentry",
+            "vault_token",
+            "doppler_token",
+            "supabase",
+            "planetscale_password",
+            "vercel",
+            "netlify_token",
+            "flyio_token",
+            "cloudflare",
+            "firebase",
+            "mongodb_connection",
+        ]
+    
+    async def verify_secret(self, secret_type: str, secret_value: str, extra_data: Optional[Dict[str, Any]] = None) -> Optional[bool]:
+        """
+        Verify a single secret by type and value.
+        
+        Args:
+            secret_type: Type of secret (e.g., 'github_token', 'stripe_api_key')
+            secret_value: The secret value to verify
+            extra_data: Optional additional data needed for verification (e.g., secret_key for AWS)
+            
+        Returns:
+            True if active, False if inactive, None if unknown/unsupported
+        """
+        from deployguard.core.models import Finding
+        
+        # Create a minimal Finding object for the verifier
+        finding = Finding(
+            pattern_id=secret_type,
+            pattern_name=secret_type,
+            file_path="<api>",
+            line_number=0,
+            matched_text=secret_value[:20] + "..." if len(secret_value) > 20 else secret_value,
+            severity="high",
+            type="secret",
+            secret_type=secret_type,
+            value=secret_value,
+        )
+        
+        result = await self.verify_finding(finding)
+        
+        if result.status == VerificationStatus.VERIFIED_ACTIVE:
+            return True
+        elif result.status == VerificationStatus.VERIFIED_INACTIVE:
+            return False
+        else:
+            return None
+    
     # =========================================================================
     # AWS Verification
     # =========================================================================
