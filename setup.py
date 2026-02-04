@@ -42,6 +42,7 @@ setup(
         "colorama>=0.4.6",
         "rich>=13.7.0",
         "requests>=2.31.0",
+        "aiohttp>=3.9.0",
     ],
     entry_points={
         "console_scripts": [
