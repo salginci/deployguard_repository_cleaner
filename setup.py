@@ -11,11 +11,11 @@ setup(
     name="deployguard",
     version="0.1.0",
     author="DeployGuard Team",
-    author_email="team@deployguard.io",
+    author_email="team@deployguard.net",
     description="Automatically detect, remove, and manage exposed secrets in Git repositories",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/yourusername/deployguard_repository_cleaner",
+    url="https://github.com/salginci/deployguard_repository_cleaner",
     packages=find_packages(exclude=["tests", "tests.*"]),
     classifiers=[
         "Development Status :: 3 - Alpha",

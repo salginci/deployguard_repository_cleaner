@@ -49,7 +49,7 @@ Install once, use in any repository:
 
 ```bash
 # Option 1: Install from source (current)
-git clone https://github.com/yourusername/deployguard_repository_cleaner.git
+git clone https://github.com/salginci/deployguard_repository_cleaner.git
 cd deployguard_repository_cleaner
 pip install -e .
 
@@ -709,7 +709,7 @@ GitHub/Bitbucket integration requires internet only if you're scanning remote re
 ### Run from Source
 
 ```bash
-git clone https://github.com/yourusername/deployguard_repository_cleaner.git
+git clone https://github.com/salginci/deployguard_repository_cleaner.git
 cd deployguard_repository_cleaner
 
 # Create virtual environment

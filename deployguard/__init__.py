@@ -2,7 +2,7 @@
 
 __version__ = "0.1.0"
 __author__ = "DeployGuard Team"
-__email__ = "team@deployguard.io"
+__email__ = "team@deployguard.net"
 
 from deployguard.core.models import (
     Finding,

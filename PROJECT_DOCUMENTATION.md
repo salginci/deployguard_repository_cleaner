@@ -570,7 +570,7 @@ deployguard publish secrets --scan-id <scan-id> --target-repo <repo>
 pip install deployguard
 
 # Or install from source
-git clone https://github.com/yourusername/deployguard_repository_cleaner
+git clone https://github.com/salginci/deployguard_repository_cleaner
 cd deployguard_repository_cleaner
 pip install -e .
 ```
@@ -880,7 +880,7 @@ requests.post(
 
 ## 📞 Support & Community
 
-- **Documentation**: https://deployguard.readthedocs.io
+- **Documentation**: https://deployguard.net/docs
 - **Issues**: GitHub Issues
 - **Discussions**: GitHub Discussions
 - **Slack**: #deployguard channel
