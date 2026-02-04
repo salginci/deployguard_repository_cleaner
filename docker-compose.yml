@@ -1,0 +1,85 @@
+version: '3.8'
+
+services:
+  api:
+    build:
+      context: .
+      target: development
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+      - deployguard-temp:/tmp/deployguard
+    environment:
+      - ENVIRONMENT=development
+      - DATABASE_URL=postgresql://deployguard:deployguard@db:5432/deployguard
+      - REDIS_URL=redis://redis:6379/0
+      - DEBUG=true
+    depends_on:
+      - db
+      - redis
+    networks:
+      - deployguard-network
+    restart: unless-stopped
+
+  db:
+    image: postgres:15-alpine
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_DB=deployguard
+      - POSTGRES_USER=deployguard
+      - POSTGRES_PASSWORD=deployguard
+    ports:
+      - "5432:5432"
+    networks:
+      - deployguard-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U deployguard"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - deployguard-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      target: development
+    command: celery -A deployguard.api.worker worker --loglevel=info
+    volumes:
+      - .:/app
+      - deployguard-temp:/tmp/deployguard
+    environment:
+      - ENVIRONMENT=development
+      - DATABASE_URL=postgresql://deployguard:deployguard@db:5432/deployguard
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      - db
+      - redis
+    networks:
+      - deployguard-network
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  redis-data:
+  deployguard-temp:
+
+networks:
+  deployguard-network:
+    driver: bridge
