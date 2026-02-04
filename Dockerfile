@@ -58,10 +58,12 @@ RUN pip install --upgrade pip && \
 COPY deployguard ./deployguard
 COPY config ./config
 COPY setup.py .
+COPY pyproject.toml .
 COPY README.md .
+COPY MANIFEST.in .
 
-# Install package
-RUN pip install ".[api]"
+# Install package with api extras
+RUN pip install -e ".[api]"
 
 # Create non-root user
 RUN useradd -m -u 1000 deployguard && \
