@@ -1,0 +1,12 @@
+include LICENSE
+include README.md
+include requirements.txt
+include requirements-dev.txt
+recursive-include deployguard/config *.yaml *.yml
+recursive-include config *.yaml *.yml
+global-exclude *.pyc
+global-exclude __pycache__
+global-exclude *.so
+global-exclude .git
+global-exclude .gitignore
+global-exclude .env
