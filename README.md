@@ -48,13 +48,13 @@ DeployGuard is a **100% custom-built** secret detection and remediation tool tha
 Install once, use in any repository:
 
 ```bash
-# Option 1: Install from source (current)
+# Option 1: Install from PyPI (recommended)
+pip install deployguard-repo-guard
+
+# Option 2: Install from source
 git clone https://github.com/salginci/deployguard_repository_cleaner.git
 cd deployguard_repository_cleaner
 pip install -e .
-
-# Option 2: Install from PyPI (coming soon)
-pip install deployguard
 ```
 
 After installation, `deployguard` is available globally:
@@ -73,7 +73,7 @@ If you prefer project-level isolation:
 cd ~/my-project
 python -m venv venv
 source venv/bin/activate
-pip install deployguard
+pip install deployguard-repo-guard
 ```
 
 ### Docker Installation
@@ -504,7 +504,7 @@ jobs:
 
       - name: Install DeployGuard
         run: |
-          pip install deployguard
+          pip install deployguard-repo-guard
 
       - name: Run Secret Scan
         run: |
@@ -534,7 +534,7 @@ secret-scan:
   image: python:3.11
   stage: test
   script:
-    - pip install deployguard
+    - pip install deployguard-repo-guard
     - deployguard scan local --path . --min-severity high --output results.json
   artifacts:
     reports:
@@ -635,7 +635,7 @@ deployguard scan local --path . --patterns my-patterns.yaml
 
 ```bash
 # Install once
-pip install deployguard
+pip install deployguard-repo-guard
 
 # Use anywhere
 cd ~/project-a && deployguard scan local --path .
