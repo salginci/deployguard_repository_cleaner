@@ -47,23 +47,24 @@ CMD ["uvicorn", "deployguard.api.app:app", "--host", "0.0.0.0", "--port", "8000"
 # Stage 3: Production image
 FROM base as production
 
-# Copy requirements
+WORKDIR /app
+
+# Copy everything needed for install
 COPY requirements.txt .
-
-# Install Python dependencies
-RUN pip install --upgrade pip && \
-    pip install -r requirements.txt
-
-# Copy application code
-COPY deployguard ./deployguard
-COPY config ./config
 COPY setup.py .
 COPY pyproject.toml .
 COPY README.md .
 COPY MANIFEST.in .
+COPY deployguard ./deployguard
+COPY config ./config
 
-# Install package with api extras
-RUN pip install -e ".[api]"
+# Install Python dependencies and package
+RUN pip install --upgrade pip && \
+    pip install -r requirements.txt && \
+    pip install ".[api]"
+
+# Verify the install worked
+RUN python -c "from deployguard.api.app import app; print('API module loaded successfully')"
 
 # Create non-root user
 RUN useradd -m -u 1000 deployguard && \
