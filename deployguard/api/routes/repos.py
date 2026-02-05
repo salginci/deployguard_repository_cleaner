@@ -8,6 +8,7 @@ Flow:
 4. User can list and scan their repositories
 """
 
+import os
 from datetime import datetime
 from typing import Optional
 
@@ -535,6 +536,7 @@ async def select_repository(
         "provider": provider,
         "token": token_data["token"],
         "username": token_data["username"],
+        "server_url": token_data.get("server_url"),  # Store server_url for Bitbucket Server
         "selected_at": datetime.utcnow(),
     }
     
@@ -600,29 +602,61 @@ async def scan_repository(
     repo_data = _connected_repos[key]
     provider = repo_data["provider"]
     token = repo_data["token"]
-    username = repo_data["username"]
+    username = repo_data.get("username")
+    server_url = repo_data.get("server_url")
     
     options = options or ScanOptionsRequest()
     
-    # Build authenticated clone URL
+    # Build authenticated clone URL based on provider
     if provider == "github":
         clone_url = f"https://oauth2:{token}@github.com/{repo_full_name}.git"
-    else:  # bitbucket
+    elif provider == "bitbucket":
+        # Bitbucket Cloud uses username:app_password
         clone_url = f"https://{username}:{token}@bitbucket.org/{repo_full_name}.git"
+    elif provider == "bitbucket_server":
+        # Bitbucket Server/Data Center uses token-based auth
+        # repo_full_name format: PROJECT_KEY/repo_slug
+        if not server_url:
+            raise HTTPException(status_code=400, detail="Server URL not found for Bitbucket Server")
+        server_url = server_url.rstrip("/")
+        # Clone URL format: https://token@server/scm/project/repo.git
+        # Or with HTTP access token: we can use the token directly in the URL
+        project_key, repo_slug = repo_full_name.split("/", 1)
+        clone_url = f"{server_url}/scm/{project_key.lower()}/{repo_slug}.git"
+        # For Bitbucket Server, we'll use git credential helper or header-based auth
+    else:
+        raise HTTPException(status_code=400, detail=f"Unknown provider: {provider}")
     
     # Clone to temp directory
     temp_dir = tempfile.mkdtemp(prefix="deployguard_scan_")
     
     try:
-        # Clone
+        # Set up environment for git authentication
+        env = os.environ.copy()
+        
+        # Clone command
         clone_args = ["git", "clone"]
         if not options.scan_history:
             clone_args.extend(["--depth", "1"])
         if options.branch:
             clone_args.extend(["--branch", options.branch])
-        clone_args.extend([clone_url, temp_dir])
         
-        result = subprocess.run(clone_args, capture_output=True, text=True, timeout=300)
+        # For Bitbucket Server, use header-based auth with git config
+        if provider == "bitbucket_server":
+            # Use git with http.extraHeader for Bearer token auth
+            clone_args = [
+                "git", "-c", f"http.extraHeader=Authorization: Bearer {token}",
+                "clone"
+            ]
+            if not options.scan_history:
+                clone_args.extend(["--depth", "1"])
+            if options.branch:
+                clone_args.extend(["--branch", options.branch])
+            clone_args.extend([clone_url, temp_dir])
+        else:
+            clone_args.extend([clone_url, temp_dir])
+        
+        result = subprocess.run(clone_args, capture_output=True, text=True, timeout=300, env=env)
         
         if result.returncode != 0:
             raise HTTPException(status_code=500, detail=f"Clone failed: {result.stderr}")
