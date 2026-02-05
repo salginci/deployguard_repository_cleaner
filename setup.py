@@ -8,7 +8,7 @@ this_directory = Path(__file__).parent
 long_description = (this_directory / "README.md").read_text()
 
 setup(
-    name="deployguard",
+    name="deployguard-repo-guard",
     version="0.1.0",
     author="DeployGuard Team",
     author_email="team@deployguard.net",

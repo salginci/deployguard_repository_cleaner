@@ -45,7 +45,8 @@ def format_finding_table(findings: List[Finding]) -> None:
             "medium": "🟡",
             "low": "🟢"
         }
-        emoji = severity_emoji.get(finding.severity.value, "⚪")
+        severity_val = finding.severity.value if hasattr(finding.severity, 'value') else str(finding.severity)
+        emoji = severity_emoji.get(severity_val, "⚪")
         
         # Extract variable name and value from metadata
         var_name = finding.metadata.get("variable_name", finding.suggested_variable) or "-"
@@ -62,8 +63,12 @@ def format_finding_table(findings: List[Finding]) -> None:
         
         file_loc = f"{Path(finding.file_path).name}:{finding.line_number}"
         
+        # Handle both enum and string types for severity and type
+        severity_str = finding.severity.value if hasattr(finding.severity, 'value') else str(finding.severity)
+        type_str = finding.type.value if hasattr(finding.type, 'value') else str(finding.type)
+        
         click.echo(
-            f"{i:<4} {emoji} {finding.severity.value:<6} {finding.type.value:<18} "
+            f"{i:<4} {emoji} {severity_str:<6} {type_str:<18} "
             f"{var_name:<25} {display_value:<30} {file_loc:<30}"
         )
 
@@ -77,8 +82,8 @@ def export_findings_json(findings: List[Finding], output_path: str, scan_path: s
         "findings": [
             {
                 "id": i + 1,
-                "type": f.type.value,
-                "severity": f.severity.value,
+                "type": f.type.value if hasattr(f.type, 'value') else str(f.type),
+                "severity": f.severity.value if hasattr(f.severity, 'value') else str(f.severity),
                 "file_path": f.file_path,
                 "line_number": f.line_number,
                 "variable_name": f.metadata.get("variable_name") or f.suggested_variable,
@@ -109,8 +114,8 @@ def export_findings_csv(findings: List[Finding], output_path: str) -> None:
         for i, f in enumerate(findings, 1):
             writer.writerow([
                 i,
-                f.severity.value,
-                f.type.value,
+                f.severity.value if hasattr(f.severity, 'value') else str(f.severity),
+                f.type.value if hasattr(f.type, 'value') else str(f.type),
                 f.metadata.get("variable_name") or f.suggested_variable or "-",
                 f.metadata.get("actual_value") or f.exposed_value,
                 f.suggested_variable or "-",
@@ -146,7 +151,7 @@ def export_env_template(findings: List[Finding], output_path: str) -> None:
         var_name = f.metadata.get("variable_name") or f.suggested_variable
         if var_name and var_name not in env_vars:
             env_vars[var_name] = {
-                "type": f.type.value,
+                "type": f.type.value if hasattr(f.type, 'value') else str(f.type),
                 "description": f.description,
                 "files": [f.file_path],
             }
@@ -270,7 +275,7 @@ def scan_local(ctx, path: str, patterns: Optional[str], output: Optional[str],
         
         filtered_findings = [
             f for f in all_findings 
-            if severity_order.get(f.severity.value, 0) >= min_level
+            if severity_order.get(f.severity.value if hasattr(f.severity, 'value') else str(f.severity), 0) >= min_level
         ]
         
         # Display summary
@@ -281,7 +286,8 @@ def scan_local(ctx, path: str, patterns: Optional[str], output: Optional[str],
         # Count by severity
         severity_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
         for finding in filtered_findings:
-            severity_counts[finding.severity.value] = severity_counts.get(finding.severity.value, 0) + 1
+            sev_val = finding.severity.value if hasattr(finding.severity, 'value') else str(finding.severity)
+            severity_counts[sev_val] = severity_counts.get(sev_val, 0) + 1
         
         click.echo(f"\n🔴 Critical: {severity_counts['critical']}")
         click.echo(f"🟠 High:     {severity_counts['high']}")
@@ -295,7 +301,8 @@ def scan_local(ctx, path: str, patterns: Optional[str], output: Optional[str],
         # Count by type
         type_counts: Dict[str, int] = {}
         for f in filtered_findings:
-            type_counts[f.type.value] = type_counts.get(f.type.value, 0) + 1
+            type_name = f.type.value if hasattr(f.type, 'value') else str(f.type)
+            type_counts[type_name] = type_counts.get(type_name, 0) + 1
         
         if type_counts:
             click.echo("\n📋 By Type:")
@@ -323,9 +330,11 @@ def scan_local(ctx, path: str, patterns: Optional[str], output: Optional[str],
                 display_value = value[:30] + "..." if len(value) > 30 else value
                 
                 severity_emoji = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢"}
-                emoji = severity_emoji.get(finding.severity.value, "⚪")
+                sev_val = finding.severity.value if hasattr(finding.severity, 'value') else str(finding.severity)
+                emoji = severity_emoji.get(sev_val, "⚪")
                 
-                click.echo(f"{i}. {emoji} {finding.type.value}")
+                type_val = finding.type.value if hasattr(finding.type, 'value') else str(finding.type)
+                click.echo(f"{i}. {emoji} {type_val}")
                 click.echo(f"   Variable: {var_name}")
                 click.echo(f"   Value: {display_value}")
                 click.echo(f"   File: {finding.file_path}:{finding.line_number}")
@@ -613,7 +622,8 @@ def scan_remote(ctx, repo: str, platform: str, branch: str, output: Optional[str
         
         severity_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
         for finding in all_findings:
-            severity_counts[finding.severity.value] = severity_counts.get(finding.severity.value, 0) + 1
+            sev_val = finding.severity.value if hasattr(finding.severity, 'value') else str(finding.severity)
+            severity_counts[sev_val] = severity_counts.get(sev_val, 0) + 1
         
         click.echo(f"\n🔴 Critical: {severity_counts['critical']}")
         click.echo(f"🟠 High:     {severity_counts['high']}")
