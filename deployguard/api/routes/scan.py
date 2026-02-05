@@ -3,10 +3,14 @@
 import hashlib
 import os
 import uuid
+import tempfile
+import shutil
+import subprocess
 from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, BackgroundTasks
+from pydantic import BaseModel
 
 from deployguard.api.schemas import (
     ScanRequest,
@@ -23,6 +27,156 @@ router = APIRouter()
 
 # In-memory store for scans (replace with database in production)
 _scans: dict[str, dict] = {}
+
+
+# =============================================================================
+# Remote Scan Request (called by Go backend with decrypted token)
+# =============================================================================
+
+class RemoteScanRequest(BaseModel):
+    """Request to scan a remote repository with provided credentials."""
+    provider: str  # "github", "bitbucket", "bitbucket_server"
+    repository: str  # "owner/repo"
+    token: str  # Decrypted access token
+    username: Optional[str] = None  # For Bitbucket Cloud
+    server_url: Optional[str] = None  # For Bitbucket Server
+    branch: Optional[str] = None
+    scan_history: bool = False
+    verify_secrets: bool = False
+
+
+class RemoteScanResponse(BaseModel):
+    """Response from remote scan."""
+    scan_id: str
+    secrets_found: int
+    files_scanned: int
+    findings: list
+
+
+@router.post("/scan/remote", response_model=RemoteScanResponse)
+async def scan_remote_repository(request: RemoteScanRequest) -> RemoteScanResponse:
+    """
+    Scan a remote repository using provided credentials.
+    
+    This endpoint is called by the Go backend which decrypts and passes the token.
+    It clones the repo, runs the scan, and returns results synchronously.
+    """
+    from deployguard.core.scanner import SecretScanner
+    
+    scan_id = str(uuid.uuid4())
+    temp_dir = None
+    
+    try:
+        # Create temp directory for clone
+        temp_dir = tempfile.mkdtemp(prefix="deployguard_scan_")
+        
+        # Build clone URL with auth
+        clone_url = _build_clone_url(
+            provider=request.provider,
+            repository=request.repository,
+            token=request.token,
+            username=request.username,
+            server_url=request.server_url,
+        )
+        
+        # Clone repository
+        clone_cmd = ["git", "clone", "--depth", "1"]
+        if request.branch:
+            clone_cmd.extend(["--branch", request.branch])
+        clone_cmd.extend([clone_url, temp_dir])
+        
+        result = subprocess.run(
+            clone_cmd,
+            capture_output=True,
+            text=True,
+            timeout=300,  # 5 minute timeout
+        )
+        
+        if result.returncode != 0:
+            raise HTTPException(
+                status_code=500, 
+                detail=f"Failed to clone repository: {result.stderr}"
+            )
+        
+        # Run scan
+        scanner = SecretScanner()
+        findings = scanner.scan_directory(temp_dir)
+        
+        # Convert findings to response format
+        finding_responses = []
+        for finding in findings:
+            # Redact matched text
+            matched = finding.matched_text or ""
+            if len(matched) > 8:
+                redacted = matched[:4] + "*" * (len(matched) - 8) + matched[-4:]
+            else:
+                redacted = "*" * len(matched)
+            
+            # Get relative path (strip temp dir)
+            file_path = finding.file_path
+            if file_path.startswith(temp_dir):
+                file_path = file_path[len(temp_dir):].lstrip("/\\")
+            
+            finding_responses.append({
+                "file_path": file_path,
+                "line_number": finding.line_number,
+                "secret_type": finding.pattern_name or finding.pattern_id,
+                "severity": finding.severity.value if hasattr(finding.severity, 'value') else str(finding.severity),
+                "description": f"Potential {finding.pattern_name or finding.pattern_id} detected",
+                "pattern": finding.pattern_id,
+                "secret_preview": redacted,
+                "commit_sha": getattr(finding, 'commit_hash', None),
+                "author": getattr(finding, 'author', None),
+            })
+        
+        return RemoteScanResponse(
+            scan_id=scan_id,
+            secrets_found=len(finding_responses),
+            files_scanned=getattr(scanner, 'files_scanned', 0),
+            findings=finding_responses,
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Scan failed: {str(e)}")
+    finally:
+        # Clean up temp directory
+        if temp_dir and os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def _build_clone_url(
+    provider: str,
+    repository: str,
+    token: str,
+    username: Optional[str] = None,
+    server_url: Optional[str] = None,
+) -> str:
+    """Build authenticated clone URL based on provider."""
+    provider = provider.lower()
+    
+    if provider == "github":
+        # GitHub: https://x-access-token:{token}@github.com/{owner}/{repo}.git
+        return f"https://x-access-token:{token}@github.com/{repository}.git"
+    
+    elif provider == "bitbucket" or provider == "bitbucket_cloud":
+        # Bitbucket Cloud: https://{username}:{app_password}@bitbucket.org/{owner}/{repo}.git
+        if not username:
+            raise ValueError("Bitbucket Cloud requires username")
+        return f"https://{username}:{token}@bitbucket.org/{repository}.git"
+    
+    elif provider == "bitbucket_server":
+        # Bitbucket Server: https://{token}@{server}/scm/{project}/{repo}.git
+        if not server_url:
+            raise ValueError("Bitbucket Server requires server_url")
+        # Remove protocol from server_url if present
+        server = server_url.replace("https://", "").replace("http://", "").rstrip("/")
+        # Bitbucket Server uses HTTP access tokens
+        return f"https://x-token-auth:{token}@{server}/scm/{repository}.git"
+    
+    else:
+        raise ValueError(f"Unsupported provider: {provider}")
 
 
 def _finding_to_response(finding, verified: bool = False) -> FindingResponse:

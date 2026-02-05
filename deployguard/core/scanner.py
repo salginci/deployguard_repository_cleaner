@@ -52,12 +52,13 @@ class SecretScanner:
     - Context extraction
     """
 
-    def __init__(self, patterns_file: Optional[str] = None):
+    def __init__(self, patterns_file: Optional[str] = None, max_file_size: int = 500_000):
         """
         Initialize the secret scanner.
 
         Args:
             patterns_file: Path to YAML file with secret patterns
+            max_file_size: Maximum file size in bytes to scan (default: 500KB)
         """
         self.patterns: List[SecretPattern] = []
         self.file_includes: List[str] = []
@@ -65,6 +66,21 @@ class SecretScanner:
         self.entropy_enabled: bool = True
         self.min_entropy: float = 4.5
         self.min_length: int = 20
+        self.max_file_size: int = max_file_size
+        
+        # Default binary/archive extensions to always skip
+        self.skip_extensions: Set[str] = {
+            '.tgz', '.tar', '.gz', '.zip', '.rar', '.7z',
+            '.exe', '.dll', '.so', '.dylib', '.bin',
+            '.png', '.jpg', '.jpeg', '.gif', '.ico', '.svg', '.webp',
+            '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
+            '.mp3', '.mp4', '.wav', '.avi', '.mov', '.wmv',
+            '.ttf', '.otf', '.woff', '.woff2', '.eot',
+            '.pyc', '.pyo', '.class', '.o', '.obj',
+            '.sqlite', '.db', '.sqlite3',
+            '.pack', '.idx',  # Git pack files
+            '.min.js', '.min.css',  # Minified files
+        }
 
         # Load patterns from config
         if patterns_file:
@@ -243,7 +259,7 @@ class SecretScanner:
         return base_name
 
     def scan_directory(
-        self, directory: str, max_files: Optional[int] = None
+        self, directory: str, max_files: Optional[int] = None, file_includes: Optional[List[str]] = None, file_excludes: Optional[List[str]] = None
     ) -> Dict[str, List[Finding]]:
         """
         Scan all files in a directory.
@@ -251,6 +267,8 @@ class SecretScanner:
         Args:
             directory: Path to directory to scan
             max_files: Maximum number of files to scan (for testing)
+            file_includes: File extensions to include (e.g., ['.py', '.js'])
+            file_excludes: File extensions to exclude
 
         Returns:
             Dictionary mapping file paths to their findings
@@ -262,11 +280,29 @@ class SecretScanner:
             raise ScanError(f"Directory not found: {directory}")
 
         files_scanned = 0
+        skipped_large = 0
+        skipped_binary = 0
+        
         for file_path in dir_path.rglob("*"):
             if max_files and files_scanned >= max_files:
                 break
 
             if not file_path.is_file():
+                continue
+            
+            # Skip binary/archive files by extension
+            suffix = file_path.suffix.lower()
+            if suffix in self.skip_extensions:
+                skipped_binary += 1
+                continue
+            
+            # Skip files that are too large
+            try:
+                file_size = file_path.stat().st_size
+                if file_size > self.max_file_size:
+                    skipped_large += 1
+                    continue
+            except OSError:
                 continue
 
             if self._should_exclude_file(str(file_path)):
