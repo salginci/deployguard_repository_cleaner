@@ -1,0 +1,443 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: deployguard
+---
+# ConfigMap for application configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: deployguard-config
+  namespace: deployguard
+data:
+  DATABASE_URL: "postgresql://deployguard:$(DB_PASSWORD)@postgres:5432/deployguard"
+  CELERY_BROKER_URL: "amqp://deployguard:$(RABBITMQ_PASSWORD)@rabbitmq:5672//"
+  CELERY_RESULT_BACKEND: "db+postgresql://deployguard:$(DB_PASSWORD)@postgres:5432/deployguard"
+  S3_ENDPOINT_URL: "http://minio:9000"
+  S3_BUCKET: "deployguard"
+  CORS_ORIGINS: "*"
+  LOG_LEVEL: "INFO"
+---
+# Secret for sensitive configuration
+apiVersion: v1
+kind: Secret
+metadata:
+  name: deployguard-secrets
+  namespace: deployguard
+type: Opaque
+stringData:
+  DB_PASSWORD: "your-secure-db-password"
+  RABBITMQ_PASSWORD: "your-secure-rabbitmq-password"
+  S3_ACCESS_KEY: "minioadmin"
+  S3_SECRET_KEY: "minioadmin"
+  AUTH_SERVICE_URL: "http://your-auth-service:8080"
+---
+# PostgreSQL Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: deployguard
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+      - name: postgres
+        image: postgres:15-alpine
+        ports:
+        - containerPort: 5432
+        env:
+        - name: POSTGRES_DB
+          value: "deployguard"
+        - name: POSTGRES_USER
+          value: "deployguard"
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: deployguard-secrets
+              key: DB_PASSWORD
+        volumeMounts:
+        - name: postgres-data
+          mountPath: /var/lib/postgresql/data
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+      volumes:
+      - name: postgres-data
+        persistentVolumeClaim:
+          claimName: postgres-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: deployguard
+spec:
+  selector:
+    app: postgres
+  ports:
+  - port: 5432
+    targetPort: 5432
+---
+# RabbitMQ Deployment (better than Redis for long-running tasks)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rabbitmq
+  namespace: deployguard
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rabbitmq
+  template:
+    metadata:
+      labels:
+        app: rabbitmq
+    spec:
+      containers:
+      - name: rabbitmq
+        image: rabbitmq:3-management-alpine
+        ports:
+        - containerPort: 5672
+        - containerPort: 15672
+        env:
+        - name: RABBITMQ_DEFAULT_USER
+          value: "deployguard"
+        - name: RABBITMQ_DEFAULT_PASS
+          valueFrom:
+            secretKeyRef:
+              name: deployguard-secrets
+              key: RABBITMQ_PASSWORD
+        volumeMounts:
+        - name: rabbitmq-data
+          mountPath: /var/lib/rabbitmq
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        readinessProbe:
+          exec:
+            command: ["rabbitmq-diagnostics", "check_running"]
+          initialDelaySeconds: 20
+          periodSeconds: 10
+      volumes:
+      - name: rabbitmq-data
+        persistentVolumeClaim:
+          claimName: rabbitmq-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rabbitmq
+  namespace: deployguard
+spec:
+  selector:
+    app: rabbitmq
+  ports:
+  - name: amqp
+    port: 5672
+    targetPort: 5672
+  - name: management
+    port: 15672
+    targetPort: 15672
+---
+# MinIO Deployment (S3-compatible storage)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: minio
+  namespace: deployguard
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: minio
+  template:
+    metadata:
+      labels:
+        app: minio
+    spec:
+      containers:
+      - name: minio
+        image: minio/minio:latest
+        args:
+        - server
+        - /data
+        - --console-address
+        - ":9001"
+        ports:
+        - containerPort: 9000
+        - containerPort: 9001
+        env:
+        - name: MINIO_ROOT_USER
+          valueFrom:
+            secretKeyRef:
+              name: deployguard-secrets
+              key: S3_ACCESS_KEY
+        - name: MINIO_ROOT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: deployguard-secrets
+              key: S3_SECRET_KEY
+        volumeMounts:
+        - name: minio-data
+          mountPath: /data
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+      volumes:
+      - name: minio-data
+        persistentVolumeClaim:
+          claimName: minio-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  namespace: deployguard
+spec:
+  selector:
+    app: minio
+  ports:
+  - name: api
+    port: 9000
+    targetPort: 9000
+  - name: console
+    port: 9001
+    targetPort: 9001
+---
+# DeployGuard API Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deployguard-api
+  namespace: deployguard
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: deployguard-api
+  template:
+    metadata:
+      labels:
+        app: deployguard-api
+    spec:
+      containers:
+      - name: api
+        image: deployguard/api:latest
+        ports:
+        - containerPort: 8000
+        envFrom:
+        - configMapRef:
+            name: deployguard-config
+        - secretRef:
+            name: deployguard-secrets
+        readinessProbe:
+          httpGet:
+            path: /api/v2/health
+            port: 8000
+          initialDelaySeconds: 10
+          periodSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /api/v2/health
+            port: 8000
+          initialDelaySeconds: 15
+          periodSeconds: 10
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: deployguard-api
+  namespace: deployguard
+spec:
+  selector:
+    app: deployguard-api
+  ports:
+  - port: 80
+    targetPort: 8000
+---
+# DeployGuard Worker Deployment (Celery)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deployguard-worker
+  namespace: deployguard
+spec:
+  replicas: 5  # Scale based on workload
+  selector:
+    matchLabels:
+      app: deployguard-worker
+  template:
+    metadata:
+      labels:
+        app: deployguard-worker
+    spec:
+      containers:
+      - name: worker
+        image: deployguard/api:latest
+        command: ["celery", "-A", "deployguard.api.v2.tasks", "worker", "--loglevel=info", "--concurrency=1"]
+        envFrom:
+        - configMapRef:
+            name: deployguard-config
+        - secretRef:
+            name: deployguard-secrets
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+        volumeMounts:
+        - name: temp-storage
+          mountPath: /tmp
+      volumes:
+      - name: temp-storage
+        emptyDir:
+          sizeLimit: 10Gi  # Temp storage for cloning repos
+---
+# DeployGuard Beat (Celery scheduler for periodic tasks)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deployguard-beat
+  namespace: deployguard
+spec:
+  replicas: 1  # Only one beat instance
+  selector:
+    matchLabels:
+      app: deployguard-beat
+  template:
+    metadata:
+      labels:
+        app: deployguard-beat
+    spec:
+      containers:
+      - name: beat
+        image: deployguard/api:latest
+        command: ["celery", "-A", "deployguard.api.v2.tasks", "beat", "--loglevel=info"]
+        envFrom:
+        - configMapRef:
+            name: deployguard-config
+        - secretRef:
+            name: deployguard-secrets
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+---
+# Persistent Volume Claims
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-pvc
+  namespace: deployguard
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: rabbitmq-pvc
+  namespace: deployguard
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: minio-pvc
+  namespace: deployguard
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Gi
+---
+# Ingress
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: deployguard-ingress
+  namespace: deployguard
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "5g"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+spec:
+  rules:
+  - host: deployguard.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: deployguard-api
+            port:
+              number: 80
+---
+# Horizontal Pod Autoscaler for workers
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: deployguard-worker-hpa
+  namespace: deployguard
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: deployguard-worker
+  minReplicas: 2
+  maxReplicas: 20
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80

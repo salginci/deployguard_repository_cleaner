@@ -172,22 +172,22 @@ SECRET = "aB3xK9mP2qR5tW8yZ1nL4cD7fG6hJ0sV"
         assert high_entropy > 4.0
 
     def test_variable_name_generation(self, patterns_config):
-        """Test generating unique variable names."""
+        """Test generating unique variable names with DG_ prefix."""
         scanner = SecretScanner(patterns_file=patterns_config)
 
-        # First AWS key should get base name
+        # First AWS key should get base name with DG_ prefix
         var1 = scanner.generate_variable_name(SecretType.AWS_ACCESS_KEY, set())
-        assert var1 == "AWS_ACCESS_KEY_ID"
+        assert var1 == "DG_AWS_ACCESS_KEY_ID"
 
         # Second AWS key should get numbered suffix
         var2 = scanner.generate_variable_name(SecretType.AWS_ACCESS_KEY, {var1})
-        assert var2 == "AWS_ACCESS_KEY_ID_1"
+        assert var2 == "DG_AWS_ACCESS_KEY_ID_1"
 
         # Third AWS key
         var3 = scanner.generate_variable_name(
             SecretType.AWS_ACCESS_KEY, {var1, var2}
         )
-        assert var3 == "AWS_ACCESS_KEY_ID_2"
+        assert var3 == "DG_AWS_ACCESS_KEY_ID_2"
 
     def test_context_extraction(self, patterns_config):
         """Test extracting context around findings."""

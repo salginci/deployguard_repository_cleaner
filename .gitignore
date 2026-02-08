@@ -1,8 +1,12 @@
-# Python
+# Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
 *$py.class
+
+# C extensions
 *.so
+
+# Distribution / packaging
 .Python
 build/
 develop-eggs/
@@ -21,81 +25,47 @@ wheels/
 *.egg
 MANIFEST
 
-# Virtual environments
-venv/
+# PyInstaller
+*.manifest
+*.spec
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+
+# Environments
+.env
+.venv
 env/
+venv/
 ENV/
 env.bak/
 venv.bak/
 
-# IDEs
+# IDE
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
-.DS_Store
-
-# Testing
-.pytest_cache/
-.coverage
-htmlcov/
-.tox/
-.nox/
-*.cover
-.hypothesis/
-coverage.xml
-*.log
-
-# Environment
-.env
-.env.local
-.env.*.local
-
-# Database
-*.db
-*.sqlite
-*.sqlite3
-
-# DeployGuard specific
-deployguard.db
-/tmp/
-/temp/
-/logs/
-*.backup
-
-# Git
-.git/
-
-# Temporary clone directories
-/clones/
-/repositories/
-
-# Reports
-/reports/
-*.pdf
-*.html
-
-# Secrets and credentials
-.secrets/
-*.pem
-*.key
-*.crt
-
-# Docker
-.dockerignore
-
-# Documentation
-/site/
-
-# Jupyter
-.ipynb_checkpoints/
-
-# Backup files
-*.bak
-*.old
-*~
 
 # OS
-Thumbs.db
 .DS_Store
+Thumbs.db
+
+# Project specific
+*.log
+*.bak
+*_backup.*
+scan_results*.json
+repos.yaml
+deployment.yml
+order-processing-security-report.json
