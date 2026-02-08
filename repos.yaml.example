@@ -1,0 +1,41 @@
+# DeployGuard - Repository Configuration
+# =======================================
+# 
+# This file configures repositories for batch processing.
+# Copy this to 'repos.yaml' and customize for your needs.
+
+# GitHub token - can be provided via environment variable or directly
+github_token_env: GITHUB_TOKEN  # Name of environment variable containing the token
+# github_token: ghp_xxxxx  # Or provide token directly (not recommended)
+
+# Base output directory for all reports and cleaned repos
+# If not specified, uses parent directory of each repository
+output_base: /Users/salginci/Source/GITHUB
+
+# List of repositories to process
+repositories:
+  # Example 1: Full workflow with build verification
+  - local_path: /Users/salginci/Source/GITHUB/deployguard_test_repo
+    github_repo: salginci/deployguard_test_repo  # format: owner/repo
+    build_command: dotnet build  # Command to verify build
+    environment: null  # Optional: 'production', 'staging', etc.
+    push_to_github: true
+    skip_build: false  # Set to true to skip build verification
+
+  # Example 2: Node.js project
+  # - local_path: /path/to/nodejs-project
+  #   github_repo: owner/nodejs-project
+  #   build_command: npm run build
+  #   environment: production
+  #   push_to_github: true
+
+  # Example 3: Python project (no build needed)
+  # - local_path: /path/to/python-project
+  #   github_repo: owner/python-project
+  #   skip_build: true
+  #   push_to_github: true
+
+  # Example 4: Scan only (no GitHub push)
+  # - local_path: /path/to/legacy-project
+  #   github_repo: ""
+  #   push_to_github: false

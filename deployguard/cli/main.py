@@ -6,6 +6,7 @@ from pathlib import Path
 from deployguard.utils.config import ConfigManager
 from deployguard.cli import auth, scan, report, clean, remediate, hooks
 from deployguard.cli.verify import verify_cmd
+from deployguard.cli.serve import serve
 
 
 @click.group()
@@ -53,6 +54,7 @@ cli.add_command(clean.clean)
 cli.add_command(remediate.remediate)
 cli.add_command(hooks.hooks)
 cli.add_command(verify_cmd)
+cli.add_command(serve)
 
 
 if __name__ == '__main__':

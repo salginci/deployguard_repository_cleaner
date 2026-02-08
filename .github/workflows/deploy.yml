@@ -1,0 +1,69 @@
+name: Build and Deploy to GKE
+
+on:
+  push:
+    branches:
+      - stage
+      - main
+
+env:
+  GCP_PROJECT_ID: our-spanner-486213-h3
+  GKE_CLUSTER: maditao-base
+  GKE_ZONE: europe-west1-c
+  IMAGE_NAME: repository-cleaner
+  REGISTRY: europe-west1-docker.pkg.dev
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: 'projects/124721081752/locations/global/workloadIdentityPools/github-pool/providers/github-provider'
+          service_account: 'lms-service@our-spanner-486213-h3.iam.gserviceaccount.com'
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+
+      - name: Configure Docker for Artifact Registry
+        run: |
+          gcloud auth configure-docker ${{ env.REGISTRY }} --quiet
+
+      - name: Build Docker image
+        run: |
+          docker build \
+            -t ${{ env.REGISTRY }}/${{ env.GCP_PROJECT_ID }}/lms-repo/${{ env.IMAGE_NAME }}:${{ github.sha }} \
+            -t ${{ env.REGISTRY }}/${{ env.GCP_PROJECT_ID }}/lms-repo/${{ env.IMAGE_NAME }}:latest \
+            --target production \
+            .
+
+      - name: Push Docker image
+        run: |
+          docker push ${{ env.REGISTRY }}/${{ env.GCP_PROJECT_ID }}/lms-repo/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          docker push ${{ env.REGISTRY }}/${{ env.GCP_PROJECT_ID }}/lms-repo/${{ env.IMAGE_NAME }}:latest
+
+      - name: Get GKE credentials
+        uses: google-github-actions/get-gke-credentials@v2
+        with:
+          cluster_name: ${{ env.GKE_CLUSTER }}
+          location: ${{ env.GKE_ZONE }}
+
+      - name: Deploy to GKE
+        run: |
+          # Create deployment from template
+          sed "s|%IMAGE_TAG%|${{ env.REGISTRY }}/${{ env.GCP_PROJECT_ID }}/lms-repo/${{ env.IMAGE_NAME }}:${{ github.sha }}|g" \
+            deployment.yml.template > deployment.yml
+          
+          kubectl apply -f deployment.yml
+          kubectl rollout status deployment/${{ env.IMAGE_NAME }} --timeout=300s

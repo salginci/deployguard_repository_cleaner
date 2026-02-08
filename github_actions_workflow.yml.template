@@ -1,0 +1,94 @@
+name: Deploy with Secrets
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+env:
+  DOTNET_VERSION: '8.0.x'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    # IMPORTANT: Define your environment here if using environment secrets
+    # environment: production
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: ${{ env.DOTNET_VERSION }}
+    
+    - name: Restore dependencies
+      run: dotnet restore
+    
+    - name: Build
+      env:
+        # =============================================================
+        # .NET ENVIRONMENT VARIABLE OVERRIDES
+        # =============================================================
+        # These environment variables override appsettings.json values.
+        # .NET uses __ (double underscore) as hierarchy separator.
+        #
+        # Example mapping:
+        #   JSON Path: ConnectionStrings.HubDbContext
+        #   Env Var:   ConnectionStrings__HubDbContext
+        #
+        # GitHub Secret: DG_ConnectionStrings__HubDbContext
+        # Maps to .NET:  ConnectionStrings__HubDbContext
+        # =============================================================
+        
+        # === CONNECTION STRINGS ===
+        ConnectionStrings__HubDbContext: ${{ secrets.DG_ConnectionStrings__HubDbContext }}
+        ConnectionStrings__LogDb: ${{ secrets.DG_ConnectionStrings__LogDb }}
+        ConnectionStrings__LockDb: ${{ secrets.DG_ConnectionStrings__LockDb }}
+        
+        # === OAUTH / AUTHENTICATION ===
+        OAuth__Key: ${{ secrets.DG_OAuth__Key }}
+        AzureB2C__client_secret: ${{ secrets.DG_AzureB2C__client_secret }}
+        
+        # === API KEYS ===
+        FCM__ServerKey: ${{ secrets.DG_FCM__ServerKey }}
+        FCM__PrivateKey: ${{ secrets.DG_FCM__PrivateKey }}
+        
+        # === EXTERNAL SERVICES ===
+        RabbitMQ__Password: ${{ secrets.DG_RabbitMQ__Password }}
+        SenkronApi__Password: ${{ secrets.DG_SenkronApi__Password }}
+        
+        # === SECURITY KEYS ===
+        Activation__Key: ${{ secrets.DG_Activation__Key }}
+        HandlingOrderValidateParams__secretKey: ${{ secrets.DG_HandlingOrderValidateParams__secretKey }}
+        
+        # ADD MORE SECRETS AS NEEDED...
+        
+      run: dotnet build --configuration Release --no-restore
+    
+    - name: Test
+      env:
+        # Same environment variables for tests
+        ConnectionStrings__HubDbContext: ${{ secrets.DG_ConnectionStrings__HubDbContext }}
+        # ... add test-specific secrets
+      run: dotnet test --no-build --verbosity normal
+    
+    - name: Publish
+      run: dotnet publish --configuration Release --no-build --output ./publish
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: production  # Use this for production secrets
+    
+    steps:
+    - name: Deploy to Server
+      env:
+        # Production environment secrets
+        ConnectionStrings__HubDbContext: ${{ secrets.DG_ConnectionStrings__HubDbContext }}
+        # ... add production secrets
+      run: |
+        echo "Deploying with secrets from GitHub..."
+        # Add your deployment commands here
