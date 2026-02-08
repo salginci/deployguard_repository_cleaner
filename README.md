@@ -255,7 +255,7 @@ const PASSENGER_REDUCER = (state) => state.passenger;
 const PASSWORD_TEXT = "Change Password";
 
 // ✅ TRUE POSITIVE (detected by DeployGuard)
-const API_KEY = "sk_live_51HxKJ2eZvKY3qBdz8fH4N2pQr9";
+const API_KEY = "sk_live_EXAMPLE1234567890abcdefghijklmno";
 const DB_PASSWORD = "MyS3cr3tP@ssw0rd!";
 ```
 
