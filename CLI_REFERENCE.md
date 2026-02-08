@@ -28,8 +28,8 @@ Complete command-line interface reference for DeployGuard.
 pip install deployguard
 
 # From source
-git clone https://github.com/yourusername/deployguard.git
-cd deployguard
+git clone https://github.com/salginci/deployguard_repository_cleaner.git
+cd deployguard_repository_cleaner
 pip install -e .
 
 # Check installation

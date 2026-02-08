@@ -38,8 +38,8 @@ DeployGuard helps you:
 pip install deployguard
 
 # From source
-git clone https://github.com/yourusername/deployguard.git
-cd deployguard
+git clone https://github.com/salginci/deployguard_repository_cleaner.git
+cd deployguard_repository_cleaner
 pip install -e .
 ```
 
@@ -114,8 +114,8 @@ pipx install deployguard
 #### 3. From Source
 
 ```bash
-git clone https://github.com/yourusername/deployguard.git
-cd deployguard
+git clone https://github.com/salginci/deployguard_repository_cleaner.git
+cd deployguard_repository_cleaner
 pip install -e .
 ```
 
@@ -442,8 +442,8 @@ We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for:
 
 ```bash
 # 1. Fork and clone
-git clone https://github.com/yourusername/deployguard.git
-cd deployguard
+git clone https://github.com/salginci/deployguard_repository_cleaner.git
+cd deployguard_repository_cleaner
 
 # 2. Create virtual environment
 python -m venv venv
@@ -570,7 +570,7 @@ SOFTWARE.
 
 - 📖 **Documentation**: [https://docs.deployguard.io](https://docs.deployguard.io)
 - 💬 **Discord**: [https://discord.gg/deployguard](https://discord.gg/deployguard)
-- 🐛 **Issues**: [GitHub Issues](https://github.com/yourusername/deployguard/issues)
+- 🐛 **Issues**: [GitHub Issues](https://github.com/salginci/deployguard_repository_cleaner/issues)
 - 📧 **Email**: support@deployguard.io
 
 ---

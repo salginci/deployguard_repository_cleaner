@@ -885,7 +885,7 @@ X-API-Version: v1
 ## Support
 
 - 📖 **Documentation**: [https://docs.deployguard.io/api](https://docs.deployguard.io/api)
-- 🐛 **Issues**: [GitHub Issues](https://github.com/yourusername/deployguard/issues)
+- 🐛 **Issues**: [GitHub Issues](https://github.com/salginci/deployguard_repository_cleaner/issues)
 - 📧 **Email**: api-support@deployguard.io
 
 ---
