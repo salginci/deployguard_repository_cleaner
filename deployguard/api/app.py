@@ -3,7 +3,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from deployguard.api.routes import scan, verify, patterns, health, repos
+from deployguard.api.routes import scan, verify, patterns, health, repos, feedback
 
 
 def create_app() -> FastAPI:
@@ -12,7 +12,7 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="DeployGuard API",
         description="Secret Detection & Verification API - No JWT (behind BFF)",
-        version="0.1.6",
+        version="0.1.7",
         docs_url="/docs",
         redoc_url="/redoc",
         openapi_url="/openapi.json",
@@ -33,6 +33,7 @@ def create_app() -> FastAPI:
     app.include_router(verify.router, prefix="/api/v1", tags=["Verify"])
     app.include_router(patterns.router, prefix="/api/v1", tags=["Patterns"])
     app.include_router(repos.router, prefix="/api/v1", tags=["Repositories"])
+    app.include_router(feedback.router, prefix="/api/v1", tags=["Feedback"])
     
     # Stats endpoint
     @app.get("/api/v1/stats", tags=["Stats"])

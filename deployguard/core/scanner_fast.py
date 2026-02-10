@@ -61,6 +61,21 @@ _FP_CSS = re.compile(r'(font-size|font-weight|color\s*:|background|border|margin
 _FP_ANGULAR = re.compile(r'(\$event|_Changed\s*\(|\{\{row\.|\?.*:.*\}\})', re.IGNORECASE)
 _FP_PLACEHOLDER = re.compile(r'^(xxx+|yyy+|test_|sample_|example_|<.*>|\$\{.*\}|%\w+%)$', re.IGNORECASE)
 
+# Android XML false positives - NOT secrets
+_FP_ANDROID = re.compile(
+    r'(schemas\.android\.com|'
+    r'xmlns:(android|app|tools)=|'
+    r'android:(layout_|id=|background=|textColor=|fontFamily=|orientation=|padding|margin|shape=)|'
+    r'tools:context=|'
+    r'@(drawable|color|font|style|android:style)/|'
+    r'<(Linear|Relative|Frame|Constraint)Layout|'
+    r'<(item|shape|solid|corners|stroke|style|selector)[\s>]|'
+    r'(match_parent|wrap_content)|'
+    r'android:state_|'
+    r'@\+id/)',
+    re.IGNORECASE
+)
+
 
 class FastSecretScanner:
     """Optimized secret scanner with pre-compiled patterns."""
@@ -167,6 +182,11 @@ class FastSecretScanner:
         if _SKIP_FILES.search(file_lower):
             return True
         
+        # Android XML files - check both value and line for Android patterns
+        if file_lower.endswith('.xml'):
+            if _FP_ANDROID.search(value) or _FP_ANDROID.search(line):
+                return True
+        
         # HTML/Angular files
         if file_lower.endswith('.html'):
             if _FP_HTML.search(value) or _FP_ANGULAR.search(value):
@@ -191,6 +211,10 @@ class FastSecretScanner:
         
         # Angular event handlers
         if _FP_ANGULAR.search(value):
+            return True
+        
+        # Android patterns in any file
+        if _FP_ANDROID.search(value):
             return True
         
         # Test data patterns (simple string checks - fast)

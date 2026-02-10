@@ -41,17 +41,6 @@ class SecretPattern:
         self.remediation = remediation
 
 
-# Pre-compiled regex patterns for value extraction (CRITICAL for performance!)
-# These are compiled ONCE at module load, not on every method call
-_RE_JSON_KV = re.compile(r'"([^"]+)"\s*:\s*"([^"]+)"', re.IGNORECASE)
-_RE_JSON_SINGLE = re.compile(r"'([^']+)'\s*:\s*'([^']+)'", re.IGNORECASE)
-_RE_JSON_MIXED = re.compile(r'''["']([^"']+)["']\s*:\s*["']([^"']+)["']''', re.IGNORECASE)
-_RE_BROKEN_JSON = re.compile(r'(\w+)"\s*:\s*"([^"]+)"', re.IGNORECASE)
-_RE_CONN_STRING = re.compile(r'Password\s*=\s*([^;"\'\s]+)', re.IGNORECASE)
-_RE_ASSIGNMENT = re.compile(r'^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*[=:]\s*["\']?(.+?)["\']?$', re.IGNORECASE)
-_RE_VAR_NAME = re.compile(r'^[A-Za-z_][A-Za-z0-9_]{0,20}$')
-
-
 class SecretScanner:
     """
     Scans code for exposed secrets using pattern matching and entropy analysis.
@@ -75,8 +64,8 @@ class SecretScanner:
         self.file_includes: List[str] = []
         self.file_excludes: List[str] = []
         self.entropy_enabled: bool = True
-        self.min_entropy: float = 5.0  # Increased from 4.5 to reduce false positives
-        self.min_length: int = 16  # Increased from 20 - real secrets are at least 16 chars
+        self.min_entropy: float = 4.5
+        self.min_length: int = 20
         self.max_file_size: int = max_file_size
         
         # Exclusion patterns for false positive filtering
@@ -216,11 +205,6 @@ class SecretScanner:
                 if self._is_false_positive(match.group(0), actual_value, current_line, file_path):
                     continue
 
-                # CRITICAL: Use actual_value for exposed_value when available!
-                # This ensures git history cleanup only replaces the SECRET VALUE,
-                # not the entire JSON key-value structure (which would break code)
-                secret_value_for_cleanup = actual_value if actual_value else match.group(0)
-                
                 finding = Finding(
                     type=pattern.secret_type,
                     severity=pattern.severity,
@@ -228,8 +212,8 @@ class SecretScanner:
                     line_number=line_number,
                     column_start=column_start,
                     column_end=column_start + len(match.group(0)),
-                    exposed_value=secret_value_for_cleanup,  # Only the secret value!
-                    exposed_value_hash=self._hash_value(secret_value_for_cleanup),
+                    exposed_value=match.group(0),
+                    exposed_value_hash=self._hash_value(actual_value or match.group(0)),
                     suggested_variable=variable_name or self._suggest_env_var(pattern.secret_type, file_path),
                     description=pattern.description,
                     remediation=pattern.remediation,
@@ -237,7 +221,6 @@ class SecretScanner:
                     metadata={
                         "variable_name": variable_name,
                         "actual_value": actual_value,
-                        "full_match": match.group(0),  # Keep full match for reference
                         "pattern_name": pattern.name,
                     }
                 )
@@ -256,10 +239,6 @@ class SecretScanner:
         """
         Extract variable name and value from a pattern match.
         
-        CRITICAL: Uses pre-compiled regex patterns (module-level constants) for performance.
-        This method is called thousands of times during a scan - regex compilation
-        must happen ONCE at module load, not on every call.
-        
         Args:
             full_match: The full matched string
             groups: Captured groups from the regex
@@ -267,59 +246,57 @@ class SecretScanner:
         Returns:
             Tuple of (variable_name, actual_value)
         """
-        # Pattern 1: Standard JSON - "key": "value"
-        json_match = _RE_JSON_KV.search(full_match)
-        if json_match:
-            return json_match.group(1).upper().replace(' ', '_').replace('-', '_'), json_match.group(2)
-        
-        # Pattern 2: Single quotes JSON - 'key': 'value'
-        json_single_match = _RE_JSON_SINGLE.search(full_match)
-        if json_single_match:
-            return json_single_match.group(1).upper().replace(' ', '_').replace('-', '_'), json_single_match.group(2)
-        
-        # Pattern 3: Mixed quotes
-        json_mixed_match = _RE_JSON_MIXED.search(full_match)
-        if json_mixed_match:
-            return json_mixed_match.group(1).upper().replace(' ', '_').replace('-', '_'), json_mixed_match.group(2)
-        
-        # Pattern 4: Broken JSON pattern like: Key": "value"
-        broken_match = _RE_BROKEN_JSON.search(full_match)
-        if broken_match:
-            return broken_match.group(1).upper(), broken_match.group(2)
-        
-        # Connection strings - keep whole string
-        conn_match = _RE_CONN_STRING.search(full_match)
-        if conn_match:
-            return "CONNECTION_STRING", full_match
-        
-        # Assignment patterns: VAR=value
-        match = _RE_ASSIGNMENT.match(full_match.strip())
-        if match:
-            return match.group(1).upper(), match.group(2)
-        
-        # Fallback - use captured groups
         variable_name = None
         actual_value = None
         
-        if groups:
-            potential_values = []
-            potential_vars = []
-            
+        # Clean up JSON-style matches like: Key": "actualvalue"
+        # Extract just the value part
+        json_value_pattern = re.compile(
+            r'(?:Key|Secret|Password|Token|ApiKey|ClientSecret|secretKey|privateKey|authKey)\s*"\s*:\s*"([^"]+)"',
+            re.IGNORECASE
+        )
+        json_match = json_value_pattern.search(full_match)
+        if json_match:
+            actual_value = json_match.group(1)
+            # Try to get variable name from the key
+            key_match = re.search(r'(\w+)"\s*:', full_match)
+            if key_match:
+                variable_name = key_match.group(1).upper()
+            return variable_name, actual_value
+        
+        # Handle connection strings - extract the password
+        conn_string_pattern = re.compile(
+            r'Password\s*=\s*([^;"\'\s]+)',
+            re.IGNORECASE
+        )
+        conn_match = conn_string_pattern.search(full_match)
+        if conn_match:
+            actual_value = conn_match.group(1)
+            variable_name = "DB_PASSWORD"
+            return variable_name, actual_value
+        
+        # Try to parse assignment patterns: VAR=value or VAR="value"
+        assignment_pattern = re.compile(
+            r'^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*[=:]\s*["\']?(.+?)["\']?$',
+            re.IGNORECASE
+        )
+        
+        match = assignment_pattern.match(full_match.strip())
+        if match:
+            variable_name = match.group(1).upper()
+            actual_value = match.group(2)
+        elif groups:
+            # Use captured groups
             for group in groups:
                 if group:
-                    group_str = str(group)
-                    if _RE_VAR_NAME.match(group_str) and len(group_str) < 30:
-                        potential_vars.append(group_str)
+                    # First non-empty group with letters is likely the variable name
+                    if re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', str(group)):
+                        if not variable_name:
+                            variable_name = str(group).upper()
                     else:
-                        potential_values.append(group_str)
-            
-            if potential_vars:
-                variable_name = potential_vars[0].upper()
-            if potential_values:
-                actual_value = max(potential_values, key=len)
-        
-        if not actual_value:
-            actual_value = full_match.strip().strip('"\'')
+                        # Otherwise it's likely the value
+                        if not actual_value:
+                            actual_value = str(group)
         
         return variable_name, actual_value
     
@@ -375,7 +352,7 @@ class SecretScanner:
         # =================================================================
         # HTML/ANGULAR TEMPLATE DETECTION - These are NOT secrets!
         # =================================================================
-        html_file = file_lower.endswith('.html') or file_lower.endswith('.component.html') or file_lower.endswith('.ejs')
+        html_file = file_lower.endswith('.html') or file_lower.endswith('.component.html')
         ts_file = file_lower.endswith('.ts') or file_lower.endswith('.component.ts')
         
         # Skip Angular/HTML templates entirely for entropy detection
@@ -396,37 +373,30 @@ class SecretScanner:
                 r'<span|<div|<p>|<a\s',         # Common HTML tags
                 r'&gt;|&lt;|&amp;',             # HTML entities
                 r'<strong>|<del>|<em>',         # HTML formatting tags
-                # HTML meta tag patterns (viewport settings are NOT secrets!)
-                r'width=device-width',          # viewport meta tag
-                r'initial-scale=',              # viewport meta tag
-                r'viewport-fit=',               # viewport meta tag
-                r'<meta\s+',                    # meta tags
-                r'name=["\']viewport["\']',     # viewport meta tag
-                r'content=["\'].*["\']',        # meta tag content
             ]
             for pattern in html_fp_patterns:
                 if re.search(pattern, value_to_check, re.IGNORECASE):
                     return True
         
         # =================================================================
-        # GITHUB ACTIONS / CI/CD YAML - These are NOT secrets!
+        # ANDROID XML PATTERNS - These are NOT secrets!
         # =================================================================
-        is_workflow_file = '.github/workflows/' in file_path or file_lower.endswith(('.yml', '.yaml'))
-        if is_workflow_file or 'github' in value_to_check.lower():
-            github_actions_patterns = [
-                r'\$\{\{\s*.*\s*\}\}',          # ${{ github.sha }}
-                r'steps\.',                      # steps.deploy.outputs.url
-                r'github\.',                     # github.repository
-                r'runner\.os',                   # runner.os
-                r'secrets\.\w+',                 # secrets.GITHUB_TOKEN (reference, not value)
-                r'echo\s+["\']',                 # echo "message"
-                r'run:\s*\|',                    # YAML multiline
-                r'uses:\s*actions/',             # uses: actions/checkout@v2
-                r'with:\s*$',                    # YAML with: block
-                r'env:\s*$',                     # YAML env: block
+        xml_file = file_lower.endswith('.xml')
+        if xml_file:
+            android_fp_patterns = [
+                r'schemas\.android\.com',           # Android XML namespace
+                r'xmlns:(android|app|tools)=',      # Android XML namespace declarations
+                r'android:(layout_|id=|background=|textColor=|fontFamily=|orientation=|padding|margin|shape=)',
+                r'tools:context=',                  # Android tools attribute
+                r'@(drawable|color|font|style|android:style)/',  # Android resource refs
+                r'<(Linear|Relative|Frame|Constraint)Layout',  # Android layouts
+                r'<(item|shape|solid|corners|stroke|style|selector)[\s>]',  # Android XML elements
+                r'(match_parent|wrap_content)',     # Android layout values
+                r'android:state_',                  # Android state selectors
+                r'@\+id/',                          # Android ID declarations
             ]
-            for pattern in github_actions_patterns:
-                if re.search(pattern, value_to_check, re.IGNORECASE):
+            for pattern in android_fp_patterns:
+                if re.search(pattern, value_to_check, re.IGNORECASE) or re.search(pattern, line, re.IGNORECASE):
                     return True
         
         # =================================================================
@@ -609,212 +579,6 @@ class SecretScanner:
                 return True
         
         # =================================================================
-        # LOTTIE ANIMATION FILES - JSON with base64 image data
-        # =================================================================
-        # Detect Lottie animation structure (generic detection)
-        if file_path and file_path.endswith('.json'):
-            try:
-                import json
-                with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                    content = f.read(5000)  # Read first 5KB to check structure
-                    if any(key in content for key in ['"layers"', '"assets"', '"fr"', '"ip"', '"op"']):
-                        # Has Lottie animation structure markers
-                        return True
-            except:
-                pass
-        
-        # =================================================================
-        # BASE64-ENCODED IMAGE DATA - These are NOT secrets!
-        # =================================================================
-        # Detect common image format headers in base64
-        base64_image_headers = [
-            r'^iVBORw0KGgo',  # PNG header in base64
-            r'^/9j/',  # JPEG header in base64
-            r'^R0lGOD',  # GIF header in base64
-            r'^data:image/',  # Data URI image
-            r'^PHN2ZyB',  # SVG header in base64
-        ]
-        for img_header in base64_image_headers:
-            if re.match(img_header, value_to_check):
-                return True
-        
-        # Check if value looks like base64 image data (very long, high entropy)
-        if len(value_to_check) > 1000:  # Very long strings
-            # Check for base64 character set
-            if re.match(r'^[A-Za-z0-9+/=]+$', value_to_check):
-                # Sample the string to detect image-like patterns
-                sample = value_to_check[:500]
-                # Look for common base64 image patterns
-                if any(pattern in sample for pattern in ['iVBOR', '/9j/', 'R0lGO', 'AAAA', 'JFIF']):
-                    return True
-        
-        # =================================================================
-        # PROGRAMMING IDENTIFIERS - Variable/function names, NOT secrets!
-        # =================================================================
-        # Detect common identifier patterns (camelCase, CONSTANT_CASE, PascalCase)
-        identifier_patterns = [
-            r'^[a-z][a-zA-Z0-9]*$',  # camelCase: myVariable
-            r'^[A-Z][A-Z0-9_]*$',  # CONSTANT_CASE: MY_CONSTANT
-            r'^[A-Z][a-z][a-zA-Z0-9]*$',  # PascalCase: MyClass
-            r'^_[a-zA-Z][a-zA-Z0-9]*$',  # _privateVar
-            r'^\$[a-zA-Z][a-zA-Z0-9]*$',  # $jqueryVar
-        ]
-        
-        # Check if it's a pure identifier (single word, no special chars)
-        if re.match(r'^[a-zA-Z_$][a-zA-Z0-9_$]*$', value_to_check):
-            # It's a valid identifier
-            # Skip if it's too long for a typical identifier (likely not a secret)
-            if len(value_to_check) > 50:
-                return True
-            # Skip common identifier patterns
-            for pattern in identifier_patterns:
-                if re.match(pattern, value_to_check):
-                    return True
-            
-            # Detect compound words (multiple capital letters = compound identifier)
-            # Examples: PASSENGERREDUCER, SELECTEDPASSENGER, PASSPORTDATA
-            capital_count = sum(1 for c in value_to_check if c.isupper())
-            if capital_count >= 3:  # Multiple capitals = compound word
-                # Check if it's all capitals (CONSTANT_CASE)
-                if value_to_check.isupper():
-                    return True
-                # Check if it's PascalCase with multiple words
-                # Count uppercase transitions (indicates word boundaries)
-                transitions = sum(1 for i in range(1, len(value_to_check)) 
-                                if value_to_check[i].isupper() and value_to_check[i-1].islower())
-                if transitions >= 1:  # Has word boundaries
-                    return True
-        
-        # =================================================================
-        # REACT/JAVASCRIPT PATTERNS - Function calls, hooks, assignments
-        # =================================================================
-        # Detect React hooks and function calls (these contain code, not secrets)
-        react_js_patterns = [
-            r'^useMemo\(',  # useMemo(
-            r'^useCallback\(',  # useCallback(
-            r'^useState\(',  # useState(
-            r'^useEffect\(',  # useEffect(
-            r'\.find\(',  # .find(
-            r'\.filter\(',  # .filter(
-            r'\.map\(',  # .map(
-            r'\.slice\(',  # .slice(
-            r'\.concat\(',  # .concat(
-            r'Array\(',  # Array(
-            r'^i18n\.translate\(',  # i18n.translate(
-            r'Validation\w+\.\w+Validation\(',  # ValidationUtil.alphaNumericValidation(
-        ]
-        for pattern in react_js_patterns:
-            if re.search(pattern, value_to_check):
-                return True
-        
-        # Detect variable assignments and destructuring
-        # Examples: "(state", "= (data)", "passenger[index];"
-        assignment_patterns = [
-            r'^\(\s*state',  # (state
-            r'=\s*\(\s*\w+\s*\)',  # = (data), = (props)
-            r'\[\s*index\s*\]',  # [index]
-            r'\[\d+\]',  # [0], [1]
-            r'^ownProps\.',  # ownProps.something
-            r'^this\.props\.',  # this.props.something
-            r'^this\.state\.',  # this.state.something
-            r'^formValues\.',  # formValues.something
-            r'^state\.form\.',  # state.form.something
-            r'^passenger\[',  # passenger[index]
-            r'^userProfile\.',  # userProfile.member
-            r'^\w+\.\w+\[',  # object.property[
-            r'^\[\.\.\.\w+\]',  # [...spread]
-            r'\w+\.\w+\(',  # object.method(
-            r'^!!\w+',  # !!variable (double negation)
-            r'\.\w+;$',  # ends with .property;
-            r'\w+\[\w+\];$',  # array[index];
-        ]
-        for pattern in assignment_patterns:
-            if re.search(pattern, value_to_check):
-                return True
-        
-        # Generic code context detection - if it contains programming syntax, it's not a secret
-        # Examples: "(passenger:", "element;", "selectedMeals[passengerId];"
-        if any(char in value_to_check for char in ['(', '[', '{', ';', '.', '!']):
-            # Contains programming syntax
-            # Check if it looks like code rather than a URL or path
-            if not re.match(r'^https?://', value_to_check):  # Not a URL
-                # Count programming indicators
-                prog_indicators = sum([
-                    '(' in value_to_check,  # Function call
-                    '[' in value_to_check,  # Array access
-                    '.' in value_to_check and not value_to_check.count('.') > 3,  # Property access (but not IP)
-                    ';' in value_to_check,  # Statement terminator
-                    '!' in value_to_check,  # Negation
-                ])
-                if prog_indicators >= 1:  # Has programming syntax
-                    return True
-        
-        # =================================================================
-        # HUMAN-READABLE TEXT / i18n STRINGS - UI text, NOT secrets!
-        # =================================================================
-        # Detect human-readable text that contains spaces and mixed case
-        # Examples: "Change Password", "Forget Password", "Şifre Değiştirme"
-        if ' ' in value_to_check:
-            # Contains spaces - likely human-readable text
-            # Check if it looks like a sentence or phrase (mixed case, readable words)
-            words = value_to_check.strip().split()
-            if len(words) >= 2:  # At least 2 words
-                # Check if words start with capital letters (Title Case for UI text)
-                capitalized_words = sum(1 for w in words if w and w[0].isupper())
-                if capitalized_words >= len(words) - 1:  # Most words capitalized
-                    # Looks like UI text: "Change Password", "Save Password"
-                    return True
-                
-                # Check for common UI/i18n patterns
-                ui_keywords = [
-                    'password', 'login', 'logout', 'sign in', 'sign up', 
-                    'register', 'forgot', 'forget', 'remember', 'save',
-                    'change', 'reset', 'verify', 'confirm', 'submit',
-                    'cancel', 'back', 'next', 'continue', 'finish',
-                    'şifre',  # Turkish: password
-                    'giriş',  # Turkish: login
-                ]
-                value_lower = value_to_check.lower()
-                if any(keyword in value_lower for keyword in ui_keywords):
-                    # Contains UI-related keywords with spaces - likely UI text
-                    return True
-        
-        # Detect i18n constant values (strings that are clearly for display)
-        # Pattern: readable text with capital letters, not random strings
-        if len(value_to_check) > 5 and len(value_to_check) < 100:
-            # Check character composition
-            alpha_count = sum(1 for c in value_to_check if c.isalpha())
-            space_count = value_to_check.count(' ')
-            
-            # If it's mostly letters with some spaces, it's likely UI text
-            if alpha_count > len(value_to_check) * 0.7 and space_count > 0:
-                return True
-        
-        # =================================================================
-        # CONFIGURATION FILE CONTEXT - Test tokens in config files
-        # =================================================================
-        # Detect if we're in a configuration/constants file (generic detection)
-        if file_path:
-            config_indicators = ['config', 'constant', 'setting', 'environment', 'env']
-            file_lower = file_path.lower()
-            if any(indicator in file_lower for indicator in config_indicators):
-                # In a config file - check if value looks like a test/placeholder token
-                # JWT tokens in config files are often test tokens
-                if re.match(r'^eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$', value_to_check):
-                    # JWT token in config file - likely a test token
-                    # Check if payload contains test indicators
-                    try:
-                        import base64
-                        payload = value_to_check.split('.')[1]
-                        # Add padding if needed
-                        payload += '=' * (4 - len(payload) % 4)
-                        decoded = base64.b64decode(payload).decode('utf-8', errors='ignore')
-                        if any(test in decoded.lower() for test in ['test', 'dev', 'demo', 'example']):
-                            return True
-                    except:
-                        pass
-        
-        # =================================================================
         # URL TEMPLATES WITHOUT CREDENTIALS - These are NOT secrets!
         # =================================================================
         # API endpoint templates with placeholders like {startDate}, {legIsn}
@@ -851,15 +615,6 @@ class SecretScanner:
             r'destination\.\w+\?\.',  # destination.Prop?.
             r'Groups\[\d+\]',  # regex Groups[0]
             r'match\.Groups',  # match.Groups
-            # Function parameters and variable assignments (NOT passwords!)
-            r'^\s*\(\s*\w+\s*\)$',  # (state), (data), (props)
-            r'^\s*\(\s*\w+\s*,$',  # (flight, (data,
-            r'^\s*(true|false|null|undefined)\s*;$',  # boolean/null literals
-            r'^\s*\w+\.\w+\s*=\s*\(\s*\w+\s*\)',  # func = (data)
-            r'^\s*[A-Z_]+\s*$',  # Pure constants: UPDATE_MEMBER_PASSWORD
-            r'^\s*get[A-Z]\w+\s*\(',  # getReservedPassengers(
-            r'\?\.\w+\?\.\w+',  # optional chaining
-            r'\?\.\w+\s*$',  # ends with optional chaining
         ]
         for code_pattern in code_indicators:
             if re.search(code_pattern, value_to_check, re.IGNORECASE):
@@ -915,7 +670,7 @@ class SecretScanner:
                 return True
         
         # =================================================================
-        # ANGULAR/HTML TEMPLATE EXPRESSIONS - These are NOT secrets!
+        # ANGULAR/HTML TEMPLATE EXPRESSIONS
         # =================================================================
         angular_patterns = [
             r'^\s*\*ngIf\s*=',
@@ -926,28 +681,9 @@ class SecretScanner:
             r'><span\s+style',  # ><span style
             r'</span><span',  # HTML tags
             r'class\s*=\s*["\']',
-            r'\$event\s*,\s*\w+\)',  # Angular event: $event, dg)
-            r'\{\{row\.\w+',  # Angular template: {{row.PropertyName
-            r'_Changed\s*\(\s*\$event',  # Event handler: _Changed($event
-            r'\w+_LegIsn\s*\?',  # Angular conditional: Arrival_LegIsn ?
-            r'row\.\w+_\w+\s*\}\}',  # Angular template: row.Arrival_ParkPosition }}
         ]
         for angular_pattern in angular_patterns:
             if re.search(angular_pattern, value_to_check, re.IGNORECASE):
-                return True
-        
-        # =================================================================
-        # TEST DATA / MOCK VALUES - These are NOT secrets!
-        # =================================================================
-        test_data_patterns = [
-            r'TotalPax\w*\s*=',  # Test passenger data: TotalPaxPassenger =
-            r'"182\+80"',  # Hardcoded test value
-            r'\d+\s*\+\s*\d+',  # Math expressions like 182+80
-            r'margin-bottom\s*:\s*\d+',  # CSS margin
-            r'height\s*:\s*calc\(',  # CSS calc()
-        ]
-        for test_pattern in test_data_patterns:
-            if re.search(test_pattern, value_to_check, re.IGNORECASE):
                 return True
         
         # =================================================================
