@@ -241,6 +241,20 @@ spec:
       labels:
         app: deployguard-api
     spec:
+      # Init container to run database migrations
+      initContainers:
+      - name: db-migrations
+        image: deployguard/api:latest
+        command: ["python", "-m", "alembic", "upgrade", "head"]
+        workingDir: /app/deployguard/api/v2
+        envFrom:
+        - configMapRef:
+            name: deployguard-config
+        - secretRef:
+            name: deployguard-secrets
+        env:
+        - name: DATABASE_URL
+          value: "postgresql://deployguard:$(DB_PASSWORD)@postgres:5432/deployguard"
       containers:
       - name: api
         image: deployguard/api:latest

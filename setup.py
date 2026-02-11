@@ -9,7 +9,7 @@ long_description = (this_directory / "README.md").read_text()
 
 setup(
     name="deployguard-repo-guard",
-    version="0.1.0",
+    version="1.0.0",
     author="DeployGuard Team",
     author_email="team@deployguard.net",
     description="Automatically detect, remove, and manage exposed secrets in Git repositories",
@@ -18,7 +18,7 @@ setup(
     url="https://github.com/salginci/deployguard_repository_cleaner",
     packages=find_packages(exclude=["tests", "tests.*"]),
     classifiers=[
-        "Development Status :: 3 - Alpha",
+        "Development Status :: 5 - Production/Stable",
         "Intended Audience :: Developers",
         "Topic :: Security",
         "Topic :: Software Development :: Version Control :: Git",

@@ -143,6 +143,9 @@ curl -X POST http://api/v2/jobs -d '{"source_url": "..."}'
 | POST | `/api/v2/jobs/{id}/clean` | Start cleaning process | ✅ |
 | GET | `/api/v2/jobs/{id}/download` | Download cleaned repo | ❌ |
 | POST | `/api/v2/jobs/{id}/push` | Push to target repo | ✅ |
+| POST | `/v1/feedback` | Submit ML training feedback | ❌ |
+| GET | `/v1/feedback/stats` | Get feedback statistics | ❌ |
+| GET | `/v1/feedback/patterns` | Get known false positive patterns | ❌ |
 
 **Graceful Degradation**: Endpoints that require the broker return HTTP 503 if RabbitMQ is unavailable.
 

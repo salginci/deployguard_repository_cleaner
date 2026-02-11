@@ -5,22 +5,19 @@ This module replaces BFG Repo-Cleaner functionality by providing:
 - Secret detection across all commits
 - History rewriting to remove/replace secrets
 - Garbage collection and cleanup
-
-UPDATED: Now supports .NET-compatible environment variable naming with __ separator
 """
 
 import os
 import re
 import subprocess
 import tempfile
-import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
 from deployguard.core.exceptions import ScanError
 from deployguard.core.models import Finding, SecretType, Severity
-from deployguard.core.scanner_fast import FastSecretScanner as SecretScanner
+from deployguard.core.scanner import SecretScanner
 
 
 @dataclass
@@ -34,9 +31,7 @@ class SecretMatch:
     commits: List[str] = field(default_factory=list)
     files: List[str] = field(default_factory=list)
     suggested_env_var: str = ""
-    replacement: str = ""  # Will be empty string for clean JSON
-    json_key: str = ""  # The JSON key name (e.g., "Password", "client_secret")
-    json_section: str = ""  # The JSON section (e.g., "AzureB2C", "ConnectionStrings")
+    replacement: str = "***REMOVED***"
     
     def __hash__(self):
         return hash(self.value_hash)
@@ -57,9 +52,8 @@ class CleanupResult:
     large_files_removed: int = 0
     errors: List[str] = field(default_factory=list)
     secrets_list: List[SecretMatch] = field(default_factory=list)
-    large_files_list: List[Tuple[str, int]] = field(default_factory=list)
+    large_files_list: List[Tuple[str, int]] = field(default_factory=list)  # (path, size_bytes)
     purge_file_path: Optional[str] = None
-    env_var_mapping: Dict[str, str] = field(default_factory=dict)  # env_var -> value
 
 
 class GitHistoryCleaner:
@@ -69,16 +63,24 @@ class GitHistoryCleaner:
     This replaces BFG Repo-Cleaner with native Python implementation using:
     - git filter-repo (preferred) or git filter-branch
     - Full history scanning across all branches
-    - .NET-compatible environment variable naming (Section__Key format)
+    - Automatic env var name suggestions
     """
     
-    ENV_VAR_PREFIX = "DG_"
+    PLACEHOLDER = "***REMOVED***"
+    ENV_VAR_PLACEHOLDER = "${{{env_var}}}"
     
     def __init__(
         self,
         scanner: Optional[SecretScanner] = None,
         patterns_file: Optional[str] = None,
     ):
+        """
+        Initialize the git history cleaner.
+        
+        Args:
+            scanner: SecretScanner instance to use for detection
+            patterns_file: Path to patterns YAML file
+        """
         self.scanner = scanner or SecretScanner(patterns_file)
         self._git_filter_repo_available = self._check_git_filter_repo()
         
@@ -89,6 +91,7 @@ class GitHistoryCleaner:
                 ["git", "filter-repo", "--version"],
                 capture_output=True,
                 text=True,
+                timeout=5,
             )
             return result.returncode == 0
         except Exception:
@@ -104,138 +107,74 @@ class GitHistoryCleaner:
         '.ttf', '.otf', '.woff', '.woff2', '.eot',
         '.pyc', '.pyo', '.class', '.o', '.obj',
         '.sqlite', '.db', '.sqlite3',
-        '.pack', '.idx',
+        '.pack', '.idx',  # Git pack files
         '.min.js', '.min.css',
         '.jar', '.war', '.ear',
         '.node', '.map',
+        # Additional extensions to skip for performance
+        '.webp', '.aab', '.apk', '.dex', '.aar',  # Android
+        '.xcassets', '.storyboard', '.xib',  # iOS
+        '.lock', '.sum',  # Lock files
+        '.svg', '.ico', '.icns',  # Icons
     }
     
+    # Files to skip by name pattern
+    SKIP_FILES = {
+        'gradlew', 'gradlew.bat', 'gradle-wrapper.jar',
+        'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml',
+        '.gitignore', '.gitattributes', 'LICENSE', 'CHANGELOG.md',
+    }
+    
+    # Directories to skip
+    SKIP_DIRS = {
+        'node_modules', '.gradle', 'build', '.idea', '.vscode',
+        '__pycache__', '.git', 'vendor', 'Pods',
+    }
+    
+    def _should_skip_file(self, file_path: str) -> bool:
+        """Check if file should be skipped for scanning."""
+        # Check extension
+        ext = Path(file_path).suffix.lower()
+        if ext in self.BINARY_EXTENSIONS:
+            return True
+        
+        # Check filename
+        name = Path(file_path).name
+        if name in self.SKIP_FILES:
+            return True
+        
+        # Check directory
+        parts = Path(file_path).parts
+        for part in parts:
+            if part in self.SKIP_DIRS:
+                return True
+        
+        return False
+    
     def _is_binary_file(self, file_path: str) -> bool:
+        """Check if file is binary based on extension."""
         ext = Path(file_path).suffix.lower()
         return ext in self.BINARY_EXTENSIONS
     
     def _run_git(self, args: List[str], cwd: str) -> subprocess.CompletedProcess:
+        """Run a git command."""
         return subprocess.run(
             ["git"] + args,
             cwd=cwd,
             capture_output=True,
             text=True,
+            timeout=30,  # Add timeout
         )
     
     def _run_git_binary(self, args: List[str], cwd: str) -> subprocess.CompletedProcess:
+        """Run a git command that may return binary content."""
         return subprocess.run(
             ["git"] + args,
             cwd=cwd,
             capture_output=True,
-            text=False,
+            text=False,  # Return bytes
+            timeout=30,  # Add timeout
         )
-    
-    def _extract_json_context(self, content: str, secret_value: str) -> Tuple[Optional[str], Optional[str]]:
-        """
-        Extract JSON section and key name for a secret value.
-        
-        For nested JSON:
-        {
-            "AzureB2C": {
-                "client_secret": "the_secret_value"
-            }
-        }
-        Returns: ("AzureB2C", "client_secret")
-        
-        For flat key-value:
-        {
-            "ApiKey": "the_secret_value"
-        }
-        Returns: (None, "ApiKey")
-        """
-        try:
-            lines = content.split('\n')
-            secret_line_idx = None
-            
-            # Find the line containing this secret
-            for i, line in enumerate(lines):
-                if secret_value in line:
-                    secret_line_idx = i
-                    break
-            
-            if secret_line_idx is None:
-                return None, None
-            
-            # Extract key name from the line
-            line = lines[secret_line_idx]
-            
-            # Match: "key_name": "value" or "key_name" : value
-            key_match = re.search(r'"([^"]+)"\s*:\s*', line)
-            if not key_match:
-                return None, None
-            
-            key_name = key_match.group(1)
-            
-            # Look for parent section by scanning backwards
-            section_name = None
-            brace_count = 0
-            
-            for i in range(secret_line_idx - 1, -1, -1):
-                check_line = lines[i].strip()
-                
-                # Track brace nesting
-                brace_count += check_line.count('}') - check_line.count('{')
-                
-                # Look for section header: "SectionName": {
-                if '{' in check_line:
-                    section_match = re.search(r'"([^"]+)"\s*:\s*\{', check_line)
-                    if section_match:
-                        section_name = section_match.group(1)
-                        break
-                    # Check if section name is on previous line
-                    if i > 0:
-                        prev_line = lines[i-1].strip()
-                        section_match = re.search(r'"([^"]+)"\s*:\s*$', prev_line)
-                        if section_match:
-                            section_name = section_match.group(1)
-                            break
-            
-            return section_name, key_name
-            
-        except Exception:
-            return None, None
-    
-    def _generate_dotnet_env_var(
-        self, 
-        section: Optional[str], 
-        key: Optional[str],
-        secret_type: str,
-        file_path: str,
-    ) -> str:
-        """
-        Generate .NET-compatible environment variable name.
-        
-        .NET uses __ (double underscore) as hierarchy separator.
-        
-        Examples:
-            - Section: "AzureB2C", Key: "client_secret" -> DG_AzureB2C__client_secret
-            - Section: None, Key: "ApiKey" -> DG_ApiKey
-            - Section: "ConnectionStrings", Key: "HubDbContext" -> DG_ConnectionStrings__HubDbContext
-        """
-        prefix = self.ENV_VAR_PREFIX
-        
-        if section and key:
-            # Nested: Section__Key
-            env_var = f"{prefix}{section}__{key}"
-        elif key:
-            # Flat: just Key
-            env_var = f"{prefix}{key}"
-        else:
-            # Fallback: use file and type
-            file_stem = Path(file_path).stem if file_path else "UNKNOWN"
-            type_name = secret_type.upper().replace("-", "_").replace(" ", "_")
-            env_var = f"{prefix}{file_stem}__{type_name}"
-        
-        # Clean up: replace invalid characters (keep __ for .NET)
-        # Only replace characters that are not alphanumeric or underscore
-        env_var = re.sub(r'[^A-Za-z0-9_]', '_', env_var)
-        
-        return env_var
     
     def scan_git_history(
         self,
@@ -244,11 +183,23 @@ class GitHistoryCleaner:
         include_all_branches: bool = True,
         show_progress: bool = True,
     ) -> List[SecretMatch]:
-        """Scan entire git history for secrets."""
+        """
+        Scan entire git history for secrets.
+        
+        Args:
+            repo_path: Path to git repository
+            branch: Specific branch to scan (None for all)
+            include_all_branches: Whether to scan all branches
+            show_progress: Whether to show progress output
+            
+        Returns:
+            List of unique SecretMatch objects found
+        """
         import sys
         
         secrets: Dict[str, SecretMatch] = {}
         
+        # Get list of commits to scan
         if include_all_branches:
             git_args = ["rev-list", "--all"]
         elif branch:
@@ -266,18 +217,26 @@ class GitHistoryCleaner:
         if show_progress:
             print(f"   Found {total_commits} commits to scan...")
         
+        files_scanned = 0
+        files_skipped = 0
+        
         for idx, commit in enumerate(commits):
             if not commit:
                 continue
             
-            if show_progress and idx > 0 and idx % 100 == 0:
+            # Show progress every 50 commits (more frequent feedback)
+            if show_progress and idx > 0 and idx % 50 == 0:
                 print(f"   Progress: {idx}/{total_commits} commits ({len(secrets)} secrets found)")
                 sys.stdout.flush()
                 
-            diff_result = self._run_git(
-                ["diff-tree", "--no-commit-id", "--name-only", "-r", commit],
-                repo_path,
-            )
+            # Get files changed in this commit
+            try:
+                diff_result = self._run_git(
+                    ["diff-tree", "--no-commit-id", "--name-only", "-r", commit],
+                    repo_path,
+                )
+            except subprocess.TimeoutExpired:
+                continue
             
             if diff_result.returncode != 0:
                 continue
@@ -285,38 +244,46 @@ class GitHistoryCleaner:
             files = diff_result.stdout.strip().split("\n")
             
             for file_path in files:
-                if not file_path or self._is_binary_file(file_path):
+                if not file_path:
                     continue
+                
+                # Skip files that don't need scanning
+                if self._should_skip_file(file_path):
+                    files_skipped += 1
+                    continue
+                
+                files_scanned += 1
                     
-                show_result = self._run_git_binary(
-                    ["show", f"{commit}:{file_path}"],
-                    repo_path,
-                )
+                # Get file content at this commit (as bytes to handle encoding)
+                try:
+                    show_result = self._run_git_binary(
+                        ["show", f"{commit}:{file_path}"],
+                        repo_path,
+                    )
+                except subprocess.TimeoutExpired:
+                    continue
                 
                 if show_result.returncode != 0:
                     continue
                 
+                # Try to decode as text, skip if binary
                 try:
                     content = show_result.stdout.decode('utf-8')
                 except UnicodeDecodeError:
                     try:
                         content = show_result.stdout.decode('latin-1')
                     except:
-                        continue
+                        continue  # Skip binary files
                 
+                # Scan the content
                 findings = self.scanner.scan_file(file_path, content)
                 
                 for finding in findings:
                     value_hash = finding.exposed_value_hash
                     
+                    # Handle both enum and string types
                     secret_type = finding.type.value if hasattr(finding.type, 'value') else str(finding.type)
                     severity = finding.severity.value if hasattr(finding.severity, 'value') else str(finding.severity)
-                    
-                    # Extract JSON context for .NET env var naming
-                    section, key = self._extract_json_context(content, finding.exposed_value)
-                    
-                    # Generate .NET-compatible env var name
-                    env_var = self._generate_dotnet_env_var(section, key, secret_type, file_path)
                     
                     if value_hash not in secrets:
                         secrets[value_hash] = SecretMatch(
@@ -326,9 +293,11 @@ class GitHistoryCleaner:
                             severity=severity,
                             commits=[commit],
                             files=[file_path],
-                            suggested_env_var=env_var,
-                            json_section=section or "",
-                            json_key=key or "",
+                            suggested_env_var=self._suggest_env_var_name(
+                                finding.exposed_value, 
+                                finding.type,
+                                file_path,
+                            ),
                         )
                     else:
                         if commit not in secrets[value_hash].commits:
@@ -347,13 +316,27 @@ class GitHistoryCleaner:
         max_size_mb: float = 100.0,
         show_progress: bool = True,
     ) -> List[Tuple[str, int]]:
-        """Scan git history for files exceeding GitHub's 100MB limit."""
+        """
+        Scan git history for files exceeding GitHub's 100MB limit.
+        
+        Args:
+            repo_path: Path to git repository
+            max_size_mb: Maximum file size in MB (default 100MB for GitHub)
+            show_progress: Whether to show progress output
+            
+        Returns:
+            List of (file_path, size_in_bytes) tuples for files exceeding limit
+        """
+        import sys
+        
         large_files: Dict[str, int] = {}
         max_size_bytes = int(max_size_mb * 1024 * 1024)
         
         if show_progress:
             print(f"   Scanning for files > {max_size_mb}MB...")
         
+        # Use git rev-list with --objects to find all objects
+        # Then use git cat-file to check sizes
         result = subprocess.run(
             ["git", "-C", repo_path, "rev-list", "--objects", "--all"],
             capture_output=True,
@@ -365,19 +348,23 @@ class GitHistoryCleaner:
                 print(f"   Warning: Could not scan for large files: {result.stderr}")
             return []
         
+        # Parse object list
         objects = []
         for line in result.stdout.strip().split('\n'):
             if line and ' ' in line:
                 parts = line.split(' ', 1)
                 if len(parts) == 2:
-                    objects.append((parts[0], parts[1]))
+                    objects.append((parts[0], parts[1]))  # (sha, path)
         
         if show_progress:
             print(f"   Found {len(objects)} objects to check...")
         
+        # Check sizes using git cat-file --batch-check
+        # This is much faster than checking individually
         shas = [obj[0] for obj in objects]
         sha_to_path = {obj[0]: obj[1] for obj in objects}
         
+        # Process in batches
         batch_size = 1000
         for i in range(0, len(shas), batch_size):
             batch = shas[i:i+batch_size]
@@ -396,6 +383,7 @@ class GitHistoryCleaner:
             for line in stdout.strip().split('\n'):
                 if not line or ' missing' in line:
                     continue
+                # Format: sha type size
                 parts = line.split()
                 if len(parts) >= 3:
                     sha = parts[0]
@@ -410,6 +398,7 @@ class GitHistoryCleaner:
                         if path not in large_files or large_files[path] < size:
                             large_files[path] = size
         
+        # Sort by size descending
         sorted_files = sorted(large_files.items(), key=lambda x: -x[1])
         
         if show_progress:
@@ -417,49 +406,260 @@ class GitHistoryCleaner:
                 print(f"   Found {len(sorted_files)} files > {max_size_mb}MB:")
                 for path, size in sorted_files[:10]:
                     print(f"      • {path}: {size / 1024 / 1024:.1f}MB")
+                if len(sorted_files) > 10:
+                    print(f"      ... and {len(sorted_files) - 10} more")
             else:
                 print(f"   No files found > {max_size_mb}MB ✓")
         
         return sorted_files
     
+    def _suggest_env_var_name(
+        self, 
+        secret_value: str, 
+        secret_type,  # Can be SecretType enum or string
+        file_path: str,
+    ) -> str:
+        """
+        Suggest an environment variable name for a secret.
+        
+        Args:
+            secret_value: The secret value
+            secret_type: Type of secret (enum or string)
+            file_path: Path where secret was found
+            
+        Returns:
+            Suggested environment variable name with DG_ prefix
+        """
+        import hashlib
+        
+        # Extract context from the secret pattern
+        type_prefixes = {
+            SecretType.AWS_KEY: "AWS_ACCESS_KEY_ID",
+            SecretType.AWS_SECRET: "AWS_SECRET_ACCESS_KEY",
+            SecretType.GITHUB_TOKEN: "GITHUB_TOKEN",
+            SecretType.API_KEY: "API_KEY",
+            SecretType.DATABASE_URL: "DATABASE_URL",
+            SecretType.PASSWORD: "DB_PASSWORD",
+            SecretType.PRIVATE_KEY: "PRIVATE_KEY",
+            SecretType.JWT_TOKEN: "JWT_SECRET",
+            SecretType.OAUTH_SECRET: "OAUTH_CLIENT_SECRET",
+            SecretType.ENCRYPTION_KEY: "ENCRYPTION_KEY",
+        }
+        
+        # Handle both enum and string types
+        if isinstance(secret_type, SecretType):
+            type_name = type_prefixes.get(secret_type, "SECRET")
+        else:
+            # It's a string - try to create a sensible name
+            type_name = str(secret_type).upper().replace("-", "_").replace(" ", "_")
+        
+        # Extract meaningful context from file path
+        file_name = Path(file_path).stem.upper()
+        parent_dir = Path(file_path).parent.name.upper() if Path(file_path).parent.name else ""
+        
+        # Skip generic file/folder names
+        generic_names = {"CONFIG", "SETTINGS", "ENV", "SECRETS", "APPSETTINGS", "SRC", "MAIN", "APP", "RES", "VALUES"}
+        
+        context_parts = []
+        if parent_dir and parent_dir not in generic_names:
+            context_parts.append(parent_dir)
+        if file_name and file_name not in generic_names:
+            context_parts.append(file_name)
+        
+        # Try to extract context from the secret value itself
+        value_context = self._extract_value_context(secret_value)
+        if value_context:
+            context_parts.append(value_context)
+        
+        # Build the env var name
+        if context_parts:
+            context = "_".join(context_parts[:2])  # Max 2 context parts
+            base_name = f"DG_{context}_{type_name}"
+        else:
+            base_name = f"DG_{type_name}"
+        
+        # Add a short hash suffix to ensure uniqueness
+        value_hash = hashlib.sha256(secret_value.encode()).hexdigest()[:4].upper()
+        env_var_name = f"{base_name}_{value_hash}"
+        
+        # Clean up the name
+        env_var_name = env_var_name.replace("__", "_").replace("-", "_")
+        
+        return env_var_name
+    
+    def _extract_value_context(self, secret_value: str) -> str:
+        """
+        Try to extract meaningful context from the secret value.
+        
+        Args:
+            secret_value: The secret value
+            
+        Returns:
+            Context string or empty string
+        """
+        value_lower = secret_value.lower()
+        
+        # Common patterns in secrets that indicate purpose
+        contexts = {
+            'firebase': 'FIREBASE',
+            'google': 'GOOGLE',
+            'maps': 'MAPS',
+            'api': 'API',
+            'auth': 'AUTH',
+            'oauth': 'OAUTH',
+            'jwt': 'JWT',
+            'database': 'DB',
+            'postgres': 'POSTGRES',
+            'mysql': 'MYSQL',
+            'mongo': 'MONGO',
+            'redis': 'REDIS',
+            'aws': 'AWS',
+            'azure': 'AZURE',
+            'stripe': 'STRIPE',
+            'twilio': 'TWILIO',
+            'sendgrid': 'SENDGRID',
+            'slack': 'SLACK',
+            'github': 'GITHUB',
+            'gitlab': 'GITLAB',
+            'bitbucket': 'BITBUCKET',
+        }
+        
+        for pattern, context in contexts.items():
+            if pattern in value_lower:
+                return context
+        
+        return ""
+    
+    def generate_purge_file(
+        self,
+        secrets: List[SecretMatch],
+        output_path: str,
+        use_env_vars: bool = False,
+    ) -> str:
+        """
+        Generate a secrets_to_purge.txt file (BFG-compatible format).
+        
+        Args:
+            secrets: List of secrets to include
+            output_path: Path to write the file
+            use_env_vars: If True, use env var placeholders; otherwise use ***REMOVED***
+            
+        Returns:
+            Path to the generated file
+        """
+        with open(output_path, "w") as f:
+            for secret in secrets:
+                # BFG format: literal_string==>replacement
+                # or just: literal_string (will be replaced with ***REMOVED***)
+                if use_env_vars and secret.suggested_env_var:
+                    replacement = self.ENV_VAR_PLACEHOLDER.format(
+                        env_var=secret.suggested_env_var
+                    )
+                    f.write(f"{secret.value}==>{replacement}\n")
+                else:
+                    f.write(f"{secret.value}\n")
+        
+        return output_path
+    
+    def generate_env_template(
+        self,
+        secrets: List[SecretMatch],
+        output_path: str,
+    ) -> str:
+        """
+        Generate a .env.template file with suggested variable names.
+        
+        Args:
+            secrets: List of secrets
+            output_path: Path to write the template
+            
+        Returns:
+            Path to the generated file
+        """
+        env_vars: Dict[str, str] = {}
+        
+        for secret in secrets:
+            var_name = secret.suggested_env_var
+            # Avoid duplicates by adding suffix
+            base_name = var_name
+            counter = 1
+            while var_name in env_vars:
+                var_name = f"{base_name}_{counter}"
+                counter += 1
+            
+            env_vars[var_name] = f"# {secret.secret_type} - Found in: {', '.join(secret.files[:3])}"
+        
+        with open(output_path, "w") as f:
+            f.write("# Environment Variables Template\n")
+            f.write("# Generated by DeployGuard Repository Cleaner\n")
+            f.write("# Replace placeholder values with actual secrets\n\n")
+            
+            for var_name, comment in sorted(env_vars.items()):
+                f.write(f"{comment}\n")
+                f.write(f"{var_name}=your_secret_here\n\n")
+        
+        return output_path
+    
     def clean_history(
         self,
         repo_path: str,
         secrets: List[SecretMatch],
+        use_env_vars: bool = False,
         dry_run: bool = True,
     ) -> CleanupResult:
         """
-        Rewrite git history to remove secrets by replacing with empty strings.
+        Rewrite git history to remove/replace secrets.
         
-        This keeps JSON structure intact:
-        "client_secret": "actual_secret" -> "client_secret": ""
+        Args:
+            repo_path: Path to git repository (should be bare/mirror clone)
+            secrets: List of secrets to remove
+            use_env_vars: Use env var placeholders instead of ***REMOVED***
+            dry_run: If True, only simulate (no actual changes)
+            
+        Returns:
+            CleanupResult with operation details
         """
         result = CleanupResult(
             secrets_found=len(secrets),
             secrets_list=secrets,
         )
         
-        for secret in secrets:
-            result.env_var_mapping[secret.suggested_env_var] = secret.value
-        
         if dry_run:
+            # Just return what would be done
             result.secrets_removed = len(secrets)
             return result
         
+        # Create temporary purge file
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+            purge_file = f.name
+            self.generate_purge_file(secrets, purge_file, use_env_vars)
+            result.purge_file_path = purge_file
+        
         try:
             if self._git_filter_repo_available:
-                cleanup_result = self._clean_with_filter_repo(repo_path, secrets)
+                # Use git-filter-repo (preferred, faster)
+                cleanup_result = self._clean_with_filter_repo(
+                    repo_path, secrets, use_env_vars
+                )
             else:
-                raise ScanError("git-filter-repo is required but not available")
+                # Fallback to git filter-branch
+                cleanup_result = self._clean_with_filter_branch(
+                    repo_path, purge_file
+                )
             
             result.secrets_removed = cleanup_result.get("removed", 0)
             result.commits_rewritten = cleanup_result.get("commits", 0)
-            result.errors.extend(cleanup_result.get("errors", []))
+            result.files_modified = cleanup_result.get("files", 0)
             
+            # Run garbage collection
             self._run_garbage_collection(repo_path)
             
         except Exception as e:
             result.errors.append(str(e))
+        finally:
+            # Clean up temp file
+            if os.path.exists(purge_file):
+                os.unlink(purge_file)
         
         return result
     
@@ -467,42 +667,57 @@ class GitHistoryCleaner:
         self,
         repo_path: str,
         secrets: List[SecretMatch],
-    ) -> Dict[str, any]:
-        """
-        Clean using git-filter-repo.
-        
-        IMPORTANT: Replaces secret values with empty strings "" to keep JSON valid.
-        """
+        use_env_vars: bool,
+    ) -> Dict[str, int]:
+        """Clean using git-filter-repo."""
+        # Create replacement expressions file
+        # Use literal matching (not regex) for safety
         with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8") as f:
             expr_file = f.name
-            valid_secrets = 0
-            
             for secret in secrets:
+                # Skip empty or very short secrets
                 if not secret.value or len(secret.value) < 4:
                     continue
                 
+                # Determine replacement
+                if use_env_vars and secret.suggested_env_var:
+                    replacement = self.ENV_VAR_PLACEHOLDER.format(
+                        env_var=secret.suggested_env_var
+                    )
+                else:
+                    replacement = self.PLACEHOLDER
+                
+                # Use literal matching (no regex:) for most secrets
+                # This avoids regex escaping issues
                 value = secret.value
                 
-                # Skip problematic characters
+                # Skip secrets with problematic characters for git-filter-repo
                 if '\x00' in value or '\n' in value or '\r' in value:
                     continue
                 
-                # CRITICAL: Replace with empty string to keep JSON structure
-                replacement = ""
-                
+                # For secrets containing ==>, use regex with proper escaping
                 if '==>' in value:
-                    escaped = re.escape(value)
+                    # Escape for regex - be very careful
+                    escaped = value.replace('\\', '\\\\')
+                    escaped = escaped.replace('.', r'\.')
+                    escaped = escaped.replace('*', r'\*')
+                    escaped = escaped.replace('+', r'\+')
+                    escaped = escaped.replace('?', r'\?')
+                    escaped = escaped.replace('[', r'\[')
+                    escaped = escaped.replace(']', r'\]')
+                    escaped = escaped.replace('(', r'\(')
+                    escaped = escaped.replace(')', r'\)')
+                    escaped = escaped.replace('{', r'\{')
+                    escaped = escaped.replace('}', r'\}')
+                    escaped = escaped.replace('^', r'\^')
+                    escaped = escaped.replace('$', r'\$')
+                    escaped = escaped.replace('|', r'\|')
                     f.write(f"regex:{escaped}==>{replacement}\n")
                 else:
-                    # Use literal matching
+                    # Use literal matching - much safer
                     f.write(f"{value}==>{replacement}\n")
-                
-                valid_secrets += 1
-            
-            print(f"   Found {valid_secrets} secrets to remove")
         
         try:
-            print("   Removing secrets from git history...")
             result = subprocess.run(
                 [
                     "git", "filter-repo",
@@ -515,23 +730,79 @@ class GitHistoryCleaner:
             )
             
             if result.returncode != 0:
-                return {
-                    "removed": 0,
-                    "commits": 0,
-                    "errors": [f"git-filter-repo failed: {result.stderr}"],
-                }
+                raise ScanError(f"git-filter-repo failed: {result.stderr}")
             
             return {
-                "removed": valid_secrets,
-                "commits": 0,
-                "errors": [],
+                "removed": len(secrets),
+                "commits": 0,  # Would need to parse output
+                "files": 0,
             }
         finally:
             os.unlink(expr_file)
     
+    def _clean_with_filter_branch(
+        self,
+        repo_path: str,
+        purge_file: str,
+    ) -> Dict[str, int]:
+        """Clean using git filter-branch (fallback)."""
+        # Read secrets from purge file
+        with open(purge_file, "r") as f:
+            lines = f.readlines()
+        
+        # Build sed-like replacement script
+        replacements = []
+        for line in lines:
+            line = line.strip()
+            if "==>" in line:
+                old, new = line.split("==>", 1)
+                replacements.append((old, new))
+            else:
+                replacements.append((line, self.PLACEHOLDER))
+        
+        # Create tree-filter script
+        script = "#!/bin/bash\n"
+        for old, new in replacements:
+            escaped_old = old.replace("'", "'\\''")
+            escaped_new = new.replace("'", "'\\''")
+            script += f"find . -type f -exec sed -i '' 's/{escaped_old}/{escaped_new}/g' {{}} \\;\n"
+        
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".sh", delete=False) as f:
+            script_file = f.name
+            f.write(script)
+            os.chmod(script_file, 0o755)
+        
+        try:
+            result = subprocess.run(
+                [
+                    "git", "filter-branch",
+                    "--tree-filter", script_file,
+                    "--prune-empty",
+                    "--",
+                    "--all",
+                ],
+                cwd=repo_path,
+                capture_output=True,
+                text=True,
+            )
+            
+            if result.returncode != 0:
+                raise ScanError(f"git filter-branch failed: {result.stderr}")
+            
+            return {
+                "removed": len(replacements),
+                "commits": 0,
+                "files": 0,
+            }
+        finally:
+            os.unlink(script_file)
+    
     def _run_garbage_collection(self, repo_path: str) -> None:
-        print("   Running garbage collection...")
+        """Run git garbage collection to physically remove old data."""
+        # Expire reflog
         self._run_git(["reflog", "expire", "--expire=now", "--all"], repo_path)
+        
+        # Aggressive garbage collection
         self._run_git(["gc", "--prune=now", "--aggressive"], repo_path)
     
     def remove_large_files(
@@ -540,42 +811,62 @@ class GitHistoryCleaner:
         large_files: List[Tuple[str, int]],
         dry_run: bool = True,
     ) -> Dict[str, any]:
-        """Remove large files from git history."""
+        """
+        Remove large files from git history.
+        
+        Uses git-filter-repo to completely remove files exceeding size limit.
+        This is required for pushing to GitHub which has 100MB file limit.
+        
+        Args:
+            repo_path: Path to git repository (should be bare/mirror clone)
+            large_files: List of (file_path, size) tuples to remove
+            dry_run: If True, only simulate (no actual changes)
+            
+        Returns:
+            Dict with operation results
+        """
         result = {
-            "found": len(large_files),
-            "removed": 0,
+            "files_found": len(large_files),
+            "files_removed": 0,
             "errors": [],
         }
         
-        if dry_run or not large_files:
-            result["removed"] = len(large_files) if not dry_run else 0
+        if not large_files:
+            return result
+        
+        if dry_run:
+            result["files_removed"] = len(large_files)
             return result
         
         if not self._git_filter_repo_available:
-            result["errors"].append("git-filter-repo not available")
+            result["errors"].append("git-filter-repo is required to remove large files. Install with: pip install git-filter-repo")
             return result
         
-        print(f"   Found {len(large_files)} large files to remove")
-        
+        # Remove each large file using git-filter-repo
         for file_path, size in large_files:
-            print(f"   Removing large files from git history...")
-            
-            proc = subprocess.run(
-                [
-                    "git", "filter-repo",
-                    "--invert-paths",
-                    "--path", file_path,
-                    "--force",
-                ],
-                cwd=repo_path,
-                capture_output=True,
-                text=True,
-            )
-            
-            if proc.returncode == 0:
-                result["removed"] += 1
-            else:
-                result["errors"].append(f"Failed to remove {file_path}: {proc.stderr}")
+            try:
+                cmd_result = subprocess.run(
+                    [
+                        "git", "filter-repo",
+                        "--invert-paths",
+                        "--path", file_path,
+                        "--force",
+                    ],
+                    cwd=repo_path,
+                    capture_output=True,
+                    text=True,
+                )
+                
+                if cmd_result.returncode == 0:
+                    result["files_removed"] += 1
+                else:
+                    result["errors"].append(f"Failed to remove {file_path}: {cmd_result.stderr}")
+                    
+            except Exception as e:
+                result["errors"].append(f"Error removing {file_path}: {str(e)}")
+        
+        # Run garbage collection after removals
+        self._run_garbage_collection(repo_path)
         
         return result
     
@@ -584,95 +875,128 @@ class GitHistoryCleaner:
         repo_path: str,
         secrets: Optional[List[SecretMatch]] = None,
         large_files: Optional[List[Tuple[str, int]]] = None,
+        use_env_vars: bool = False,
         dry_run: bool = True,
         show_progress: bool = True,
     ) -> CleanupResult:
-        """Perform full cleanup of repository."""
+        """
+        Perform full repository cleanup: secrets AND large files.
+        
+        Args:
+            repo_path: Path to git repository (should be bare/mirror clone)
+            secrets: List of secrets to remove (None to skip)
+            large_files: List of large files to remove (None to skip)
+            use_env_vars: Use env var placeholders instead of ***REMOVED***
+            dry_run: If True, only simulate (no actual changes)
+            show_progress: Show progress output
+            
+        Returns:
+            CleanupResult with all operation details
+        """
+        import sys
+        
         result = CleanupResult()
         
-        if secrets is None:
-            if show_progress:
-                print("   Scanning for secrets...")
-            secrets = self.scan_git_history(repo_path, show_progress=show_progress)
-        
-        result.secrets_found = len(secrets)
-        result.secrets_list = secrets
-        
-        if large_files is None:
-            if show_progress:
-                print("   Scanning for large files...")
-            large_files = self.scan_large_files(repo_path, show_progress=show_progress)
-        
-        result.large_files_found = len(large_files)
-        result.large_files_list = large_files
-        
-        for secret in secrets:
-            result.env_var_mapping[secret.suggested_env_var] = secret.value
-        
-        if dry_run:
-            result.secrets_removed = len(secrets)
-            result.large_files_removed = len(large_files)
-            return result
-        
+        # Handle secrets
         if secrets:
-            clean_result = self.clean_history(repo_path, secrets, dry_run=False)
-            result.secrets_removed = clean_result.secrets_removed
-            result.commits_rewritten = clean_result.commits_rewritten
-            result.errors.extend(clean_result.errors)
+            result.secrets_found = len(secrets)
+            result.secrets_list = secrets
+            
+            if show_progress:
+                print(f"   Found {len(secrets)} secrets to remove")
+            
+            if not dry_run:
+                if show_progress:
+                    print(f"   Removing secrets from git history...")
+                
+                cleanup = self.clean_history(repo_path, secrets, use_env_vars, dry_run=False)
+                result.secrets_removed = cleanup.secrets_removed
+                result.commits_rewritten = cleanup.commits_rewritten
+                result.files_modified = cleanup.files_modified
+                result.errors.extend(cleanup.errors)
+            else:
+                result.secrets_removed = len(secrets)
         
+        # Handle large files
         if large_files:
-            lf_result = self.remove_large_files(repo_path, large_files, dry_run=False)
-            result.large_files_removed = lf_result["removed"]
-            result.errors.extend(lf_result.get("errors", []))
+            result.large_files_found = len(large_files)
+            result.large_files_list = large_files
+            
+            if show_progress:
+                print(f"   Found {len(large_files)} large files to remove")
+            
+            if not dry_run:
+                if show_progress:
+                    print(f"   Removing large files from git history...")
+                
+                large_result = self.remove_large_files(repo_path, large_files, dry_run=False)
+                result.large_files_removed = large_result["files_removed"]
+                result.errors.extend(large_result.get("errors", []))
+            else:
+                result.large_files_removed = len(large_files)
+        
+        # Final garbage collection
+        if not dry_run and (secrets or large_files):
+            if show_progress:
+                print(f"   Running garbage collection...")
+            self._run_garbage_collection(repo_path)
         
         return result
     
-    def export_env_var_mapping(
+    def create_mirror_clone(
         self,
-        secrets: List[SecretMatch],
-        output_path: str,
-        format: str = "json",
+        source_url: str,
+        destination_path: str,
     ) -> str:
         """
-        Export environment variable to secret value mapping.
+        Create a mirror clone for safe history rewriting.
         
         Args:
-            secrets: List of secrets
-            output_path: Path to write the mapping
-            format: Output format ("json", "env", "github_actions")
+            source_url: URL or path to source repository
+            destination_path: Where to create the clone
+            
+        Returns:
+            Path to the created bare repository
         """
-        mapping = {}
-        for secret in secrets:
-            mapping[secret.suggested_env_var] = {
-                "value": secret.value,
-                "type": secret.secret_type,
-                "severity": secret.severity,
-                "section": secret.json_section,
-                "key": secret.json_key,
-                "files": secret.files[:3],
-            }
+        result = subprocess.run(
+            ["git", "clone", "--mirror", source_url, destination_path],
+            capture_output=True,
+            text=True,
+        )
         
-        if format == "json":
-            with open(output_path, "w", encoding="utf-8") as f:
-                json.dump(mapping, f, indent=2, ensure_ascii=False)
+        if result.returncode != 0:
+            raise ScanError(f"Failed to create mirror clone: {result.stderr}")
         
-        elif format == "env":
-            with open(output_path, "w", encoding="utf-8") as f:
-                f.write("# DeployGuard Environment Variables\n")
-                f.write("# For .NET: Use __ (double underscore) for hierarchy\n\n")
-                for env_var, data in mapping.items():
-                    value = data["value"].replace('"', '\\"')
-                    f.write(f"# Type: {data['type']}, Section: {data['section']}, Key: {data['key']}\n")
-                    f.write(f'{env_var}="{value}"\n\n')
+        return destination_path
+    
+    def push_cleaned_repo(
+        self,
+        repo_path: str,
+        remote_url: str,
+        force: bool = False,
+    ) -> bool:
+        """
+        Push cleaned repository to remote.
         
-        elif format == "github_actions":
-            with open(output_path, "w", encoding="utf-8") as f:
-                f.write("# GitHub Actions Environment Variables\n")
-                f.write("# Add this to your workflow file\n\n")
-                f.write("env:\n")
-                for env_var, data in mapping.items():
-                    # For .NET: Remove DG_ prefix so env var matches config path
-                    dotnet_var = env_var[3:] if env_var.startswith("DG_") else env_var
-                    f.write(f"  {dotnet_var}: ${{{{ secrets.{env_var} }}}}\n")
+        Args:
+            repo_path: Path to the cleaned repository
+            remote_url: URL of the target remote
+            force: Whether to use force push
+            
+        Returns:
+            True if successful
+        """
+        # Add or update remote
+        self._run_git(["remote", "set-url", "origin", remote_url], repo_path)
         
-        return output_path
+        # Use --force-with-lease for safety
+        push_args = ["push", "--mirror"]
+        if force:
+            push_args.append("--force-with-lease")
+        
+        result = self._run_git(push_args, repo_path)
+        
+        if result.returncode != 0:
+            raise ScanError(f"Failed to push: {result.stderr}")
+        
+        return True
